@@ -15,10 +15,5 @@ examples/tex
 archive/
 build/
 *.pdf
-src/tree_compress/compress.py
-src/tree_compress/rebuild.py
-experiment/lop_test_file.py
-examples/
-tests/
 .flake8
 ruff.toml
