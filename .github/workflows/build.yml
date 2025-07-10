@@ -2,6 +2,9 @@ name: Build Wheels (Nuitka)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ICML
 
 jobs:
   build:
