@@ -37,13 +37,19 @@ jobs:
         if: runner.os == 'Windows'
         run: del src\tree_compress\compress.py
 
-      - name: Build platform-specific wheel
-        run: |
-          if [ "$(uname)" = "Linux" ]; then
-            python setup.py bdist_wheel --plat-name manylinux_2_31_x86_64
-          else
-            python setup.py bdist_wheel --plat-name $(python -c "import distutils.util; print(distutils.util.get_platform().replace('-', '_'))")
-          fi
+      - name: Build platform-specific wheel (Linux)
+        if: runner.os == 'Linux'
+        run: python setup.py bdist_wheel --plat-name manylinux_2_31_x86_64
+
+      - name: Build platform-specific wheel (macOS)
+        if: runner.os == 'macOS'
+        run: python setup.py bdist_wheel --plat-name $(python -c "import distutils.util; print(distutils.util.get_platform().replace('-', '_'))")
+
+      - name: Build platform-specific wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python setup.py bdist_wheel --plat-name $(python -c "import distutils.util; print(distutils.util.get_platform().replace('-', '_'))")
+      
       - name: Upload wheels as artifact (optional)
         uses: actions/upload-artifact@v4
         with:
