@@ -3,7 +3,7 @@ name: Build and Publish Wheels
 on:
   push:
     tags:
-      - 'v*'  # run only on version tags like v0.2, v1.0 etc
+      - 'v*'
 
 jobs:
   build-and-upload:
@@ -21,24 +21,34 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      - name: Install build tools
-        run: pip install build wheel twine setuptools
+      - name: Create virtualenv
+        shell: bash
+        run: |
+          python -m venv venv
+          . venv/bin/activate || source venv/bin/activate || venv\Scripts\activate
+          python -m pip install --upgrade pip
+          pip install build wheel twine setuptools
 
       - name: Build wheel
+        shell: bash
         run: |
+          . venv/bin/activate || source venv/bin/activate || venv\Scripts\activate
           python -m build --wheel --no-isolation
 
       - name: Upload wheel to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.6.0
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
+        shell: bash
+        run: |
+          . venv/bin/activate || source venv/bin/activate || venv\Scripts\activate
+          twine upload dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
 
-      - name: Clean up dist folder
+      - name: Clean up dist folder (Linux/macOS)
+        if: runner.os != 'Windows'
         run: rm -rf dist/
+
+      - name: Clean up dist folder (Windows)
+        if: runner.os == 'Windows'
+        run: Remove-Item -Recurse -Force dist
+        shell: pwsh
