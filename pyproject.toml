@@ -2,9 +2,6 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.package-data]
-"tree_compress" = ["compress.so", "compress.pyd"]
-
 [project]
 name = "lop_compress"
 version = "0.3"

@@ -25,11 +25,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install nuitka setuptools wheel twine build
-
+          pip install nuitka setuptools wheel build twine
       - name: Compile compress.py with Nuitka
-        run: |
-          python -m nuitka --module src/tree_compress/compress.py --output-dir=src/tree_compress
+        run: python -m nuitka --module src/tree_compress/compress.py --output-dir=src/tree_compress
 
       - name: Remove original compress.py (Linux/macOS)
         if: runner.os != 'Windows'
@@ -40,7 +38,7 @@ jobs:
         run: del src\tree_compress\compress.py
 
       - name: Build wheel
-        run: python -m build --wheel --outdir dist
+        run: python -m build --wheel
 
       - name: Upload wheels as artifact (optional)
         uses: actions/upload-artifact@v4
@@ -49,7 +47,7 @@ jobs:
           path: dist/*.whl
 
       - name: Publish wheel to PyPI
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ICML')
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
