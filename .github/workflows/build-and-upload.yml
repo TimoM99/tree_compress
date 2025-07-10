@@ -40,4 +40,10 @@ jobs:
 
       - name: Clean up dist folder
         run: |
-          rm -rf dist/
+          if [ -d dist ]; then rm -rf dist; fi
+        shell: bash
+      
+      - name: Clean up dist folder (Windows)
+        if: runner.os == 'Windows'
+        run: Remove-Item -Recurse -Force dist
+
