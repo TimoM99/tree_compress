@@ -37,8 +37,8 @@ jobs:
         if: runner.os == 'Windows'
         run: del src\tree_compress\compress.py
 
-      - name: Build wheel
-        run: python -m build --wheel
+      - name: Build platform-specific wheel
+        run: python setup.py bdist_wheel --plat-name $(python -c "import distutils.util; print(distutils.util.get_platform().replace('-', '_'))")
 
       - name: Upload wheels as artifact (optional)
         uses: actions/upload-artifact@v4
@@ -51,5 +51,4 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          twine upload dist/*.whl
+        run: twine upload dist/*.whl
