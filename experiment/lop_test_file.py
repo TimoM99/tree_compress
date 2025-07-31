@@ -75,8 +75,8 @@ print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_n
 
 
 
-# # Compress xgb model using algorithm 1
-# print_memory("Before LassoCompress")
+# # # Compress xgb model using OC compress
+# print_memory("Before OC Compress")
 # start_time = time.time()
 # compr = tree_compress.LassoCompress( # For binary classification, use LassoCompress.
 #             data,
@@ -104,7 +104,31 @@ print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_n
 # gc.collect()
 # print_memory("After LassoCompress cleanup")
 
-# Compress xgb model using algorithm 2
+# Compress xgb model using OC Compress (Observable Coverage based)
+print_memory("Before OC Compress")
+start_time = time.time()
+compr_oc = tree_compress.oc_compress.Compress(
+            data,
+            at_orig,
+            score=score,
+            isworse=is_worse,
+            seed=5823,
+            silent=True
+        )
+
+print_memory("After OC Compress init")
+compr_oc.no_convergence_warning = True
+at_refined_oc = compr_oc.compress(max_rounds=2)
+best_alpha_oc = compr_oc.records[-1].alphas
+compr_time_oc = time.time() - start_time
+print_memory("After OC Compress compression")
+print(f"OC Compress time: {compr_time_oc:.2f}s")
+for rec in compr_oc.records:
+    print(rec.alphas, rec.ntrees, rec.nleafs, rec.tindex, rec.tsearch, rec.ttransform)
+
+print_memory("After OC Compress cleanup")
+
+# Compress xgb model using LOP
 np.random.seed(seed)
 random.seed(seed)
 
@@ -131,8 +155,8 @@ for rec in compr.records:
 
 print_memory("Final memory usage")
 
-print(f"Compression times:, Compress={compr_time_2:.2f}s")
-print(f"Trees: orig={at_orig.num_leafs()}, refined_2={at_refined_2.num_leafs()}")
+print(f"Compression times: OC Compress={compr_time_oc:.2f}s, Compress={compr_time_2:.2f}s")
+print(f"Trees: orig={at_orig.num_leafs()}, refined_OC={at_refined_oc.num_leafs()}refined_2={at_refined_2.num_leafs()}")
 print(f"Alphas: refined_2={best_alpha_2}")
 print(f"Metrics: orig={dtest.metric(at_orig):.4f}, refined_2={dtest.metric(at_refined_2):.4f}")
 
