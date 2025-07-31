@@ -564,22 +564,23 @@ class Compress:
                 coefs = best.coefs
                 atp = self.prune_trees(at, intercept, coefs, index)
 
-                print(f"mtrain {best.clf_mtrain:.4f}")
-                print(
-                    f"  atp  {self.score(self._transformy(target, self.d.ytrain), at_predlab(atp, self.d.xtrain)):.4f}",
-                    atp,
-                )
-                print(
-                    f"  at   {self.score(self._transformy(target, self.d.ytrain), at_predlab(at, self.d.xtrain)):.4f}",
-                    at,
-                )
-                print(f"mvalid {best.clf_mvalid:.4f}")
-                print(
-                    f"  atp  {self.score(self._transformy(target, self.d.yvalid), at_predlab(atp, self.d.xvalid)):.4f}"
-                )
-                print(
-                    f"  at   {self.score(self._transformy(target, self.d.yvalid), at_predlab(at, self.d.xvalid)):.4f}"
-                )
+                if not self.silent:
+                    print(f"mtrain {best.clf_mtrain:.4f}")
+                    print(
+                        f"  atp  {self.score(self._transformy(target, self.d.ytrain), at_predlab(atp, self.d.xtrain)):.4f}",
+                        atp,
+                    )
+                    print(
+                        f"  at   {self.score(self._transformy(target, self.d.ytrain), at_predlab(at, self.d.xtrain)):.4f}",
+                        at,
+                    )
+                    print(f"mvalid {best.clf_mvalid:.4f}")
+                    print(
+                        f"  atp  {self.score(self._transformy(target, self.d.yvalid), at_predlab(atp, self.d.xvalid)):.4f}"
+                    )
+                    print(
+                        f"  at   {self.score(self._transformy(target, self.d.yvalid), at_predlab(at, self.d.xvalid)):.4f}"
+                    )
 
                 self.at_singletarget[target] = atp
                 bests.append(best)
