@@ -21,7 +21,7 @@ import util
 import sys
 from tree_compress.forestprune_original import difference_array_list, evaluate, get_node_count, nodes_per_layer, prune_polish, solve_weighted, total_nodes
 import model_params
-from verification import run_verification_tasks
+from verification import run_verification_tasks, count_ocs
 
 from scipy.sparse import csr_matrix
 from sklearn.metrics import balanced_accuracy_score, root_mean_squared_error
@@ -945,12 +945,29 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
                 'verification_results': run_verification_tasks(model, dtest.X, dtest.y, timeout=1800, n=500),
                 'nb_splits_done': median_depth,
                 'memory_usage': 25*(model.num_nodes() + model.num_leafs()),
-                'model_json': model.to_json() if save else None
+                'model_json': model.to_json() if save else None,
+                'nleafs': model.num_leafs(),
+                'observed_oc_space': calculate_observable_oc_space(x=dtrain.X, at=model),
+                'oc_space': count_ocs(model, timeout=1800)
             })
         if not silent:
             __import__('pprint').pprint(results)
         print(json.dumps(results))
 
+def calculate_observable_oc_space(x, at):
+        # Find the leaf values
+        oc_space = set()
+
+        # For each datapoint, collect the leaf id from each tree
+        n_datapoints = x.shape[0]
+        n_trees = len(at)
+        # Each row: one datapoint, each column: leaf id from one tree
+        configuration = np.zeros((n_datapoints, n_trees), dtype=int)
+        for i, t in enumerate(at):
+            configuration[:, i] = t.eval_node(x)
+        # print(configuration)
+        oc_space.update(map(tuple, configuration))
+        return len(oc_space)
 
 def transform_to_regular_regr(at):
     at_result = veritas.AddTree(1, veritas.AddTreeType.REGR)
