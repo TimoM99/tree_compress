@@ -36,8 +36,8 @@ elif [ "${HOSTNAME}" = "himec04" ]; then
     NTHREADS=30
 elif [ "${HOSTNAME}" = "himec08" ]; then
     NTHREADS=30
-elif [ "${HOSTNAME}" = "pinac50" ]; then
-    NTHREADS=15
+elif [ "${HOSTNAME}" = "pinac44" ]; then
+    NTHREADS=20
 else
     NTHREADS=10  # assuming new
 fi

@@ -7,7 +7,7 @@ def get_params_xgb(d):
         "nthread": 1,
         "n_estimators": [10, 25, 50, 100],
         "max_depth": [4, 6, 8],
-        "learning_rate": [0.1, 0.25, 0.5, 1.0],
+        "learning_rate": [0.1],
         "subsample": [1.0],
         "tree_method": "hist",
     }
