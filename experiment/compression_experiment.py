@@ -1,3 +1,4 @@
+from turtle import pen
 import click
 from matplotlib.pylab import ifft
 import torch
@@ -836,6 +837,119 @@ def verification_cmd(dname, depth, n_estimators, lr, file, fold, seed, silent):
     if not silent:
         __import__('pprint').pprint(results)
     print(json.dumps(results))
+    
+@cli.command("verification_oc")
+@click.argument("dname")
+@click.option("--save", is_flag=True, default=False)
+@click.option("-m", "--model_type", type=click.Choice(["xgb", "rf", "lgb", "dt"]),
+              default="xgb")
+@click.option("--fold", default=0)
+@click.option("--abserr", default=0.02)
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=21600)
+def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    penalties = ['lop', 'lop-oc']
+    
+    d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
+    model_class = d.get_model_class(model_type)
+
+    param_dict = model_params.get_params(d, model_type)
+    for param in d.paramgrid(**param_dict):
+        # Fit xgb model
+        clf, train_time = dtrain.train(model_class, param)
+        
+        mtrain = dtrain.metric(clf)
+        mvalid = dvalid.metric(clf)
+        mtest =  dtest.metric(clf)
+        at_orig = veritas.get_addtree(clf, silent=silent)
+        n_leafs_before = at_orig.num_leafs()
+
+        results = {
+            'date_time': util.nowstr(),
+            'hostname': os.uname()[1],
+            'dname': dname,
+            'model_type': model_type,
+            'fold': fold,
+            'seed': seed,
+            'metric_name': d.metric_name,
+            'train_time': train_time,
+            'mtrain': mtrain,
+            'mvalid': mvalid,
+            'mtest': mtest,
+            'ntrees': len(at_orig),
+            'nnodes': int(at_orig.num_nodes()),
+            'nleafs': n_leafs_before,
+            'max_depth': int(at_orig.max_depth()),
+            'params': param,
+            'refinements': []
+        }
+        if save:
+            results['model_json'] = at_orig.to_json()
+
+        models = {}
+        models['xgb'] = at_orig
+        # Apply the different compression methods
+        for penalty in penalties:
+            if penalty == 'lop':
+                data = tree_compress.Data(
+                    dtrain.X.to_numpy(), dtrain.y.to_numpy(),
+                    dtest.X.to_numpy(), dtest.y.to_numpy(),
+                    dvalid.X.to_numpy(), dvalid.y.to_numpy())
+                
+                compr = tree_compress.Compress(
+                            data,
+                            at_orig,
+                            score=balanced_accuracy_score,
+                            isworse=lambda v, ref: ref-v > abserr,
+                            seed=5823,
+                            silent=silent
+                        )
+
+                compr.no_convergence_warning = True
+                at_refined = compr.compress(max_rounds=2, timeout=timeout)
+            
+            if penalty == 'lop-oc':
+                data = tree_compress.Data(
+                    dtrain.X.to_numpy(), dtrain.y.to_numpy(),
+                    dtest.X.to_numpy(), dtest.y.to_numpy(),
+                    dvalid.X.to_numpy(), dvalid.y.to_numpy())
+                
+                compr = tree_compress.oc_compress.Compress(
+                            data,
+                            at_orig,
+                            score=balanced_accuracy_score,
+                            isworse=lambda v, ref: ref-v > abserr,
+                            seed=5823,
+                            silent=silent
+                        )
+
+                compr.no_convergence_warning = True
+                at_refined = compr.compress(max_rounds=2, timeout=timeout)
+            models[penalty] = at_refined
+    
+        for mtype, model in models.items():
+            sum_depth = np.zeros(len(dtest.X))
+            for t in model:
+                nodes = t.eval_node(dtest.X)
+                depths = [t.depth(node) for node in nodes]
+                sum_depth += depths
+            median_depth = np.median(sum_depth)
+            
+            results['refinements'].append({
+                'penalty': mtype,
+                'verification_results': run_verification_tasks(model, dtest.X, dtest.y, timeout=1800, n=500),
+                'nb_splits_done': median_depth,
+                'memory_usage': 25*(model.num_nodes() + model.num_leafs()),
+                'model_json': model.to_json() if save else None
+            })
+        if not silent:
+            __import__('pprint').pprint(results)
+        print(json.dumps(results))
 
 
 def transform_to_regular_regr(at):
