@@ -853,7 +853,7 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
     torch.manual_seed(seed)
     random.seed(seed)
 
-    penalties = ['lop', 'lop-oc']
+    penalties = ['lop-oc-1', 'lop-oc-10', 'lop-oc-100']
     
     d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
     model_class = d.get_model_class(model_type)
@@ -913,7 +913,7 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
                 compr.no_convergence_warning = True
                 at_refined = compr.compress(max_rounds=2, timeout=timeout)
             
-            if penalty == 'lop-oc':
+            elif penalty == 'lop-oc':
                 data = tree_compress.Data(
                     dtrain.X.to_numpy(), dtrain.y.to_numpy(),
                     dtest.X.to_numpy(), dtest.y.to_numpy(),
@@ -930,8 +930,26 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
 
                 compr.no_convergence_warning = True
                 at_refined = compr.compress(max_rounds=2, timeout=timeout)
+
+            elif penalty.startswith('lop-oc-'):
+                data = tree_compress.Data(
+                    dtrain.X.to_numpy(), dtrain.y.to_numpy(),
+                    dtest.X.to_numpy(), dtest.y.to_numpy(),
+                    dvalid.X.to_numpy(), dvalid.y.to_numpy())
+            
+                compr = tree_compress.ocs_compress.Compress(
+                            data,
+                            at_orig,
+                            score=balanced_accuracy_score,
+                            isworse=lambda v, ref: ref-v > abserr,
+                            seed=5823,
+                            silent=silent,
+                            k=int(penalty.split('-')[-1])
+                        )
+                compr.no_convergence_warning = True
+                at_refined = compr.compress(max_rounds=2, timeout=timeout)
+            
             models[penalty] = at_refined
-    
         for mtype, model in models.items():
             sum_depth = np.zeros(len(dtest.X))
             for t in model:

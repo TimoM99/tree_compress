@@ -107,13 +107,14 @@ print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_n
 # Compress xgb model using OC Compress (Observable Coverage based)
 print_memory("Before OC Compress")
 start_time = time.time()
-compr_oc = tree_compress.oc_compress.Compress(
+compr_oc = tree_compress.ocs_compress.Compress(
             data,
             at_orig,
             score=score,
             isworse=is_worse,
             seed=5823,
-            silent=True
+            silent=True,
+            k=100
         )
 
 print_memory("After OC Compress init")
