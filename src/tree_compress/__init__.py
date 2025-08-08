@@ -5,3 +5,4 @@ from .compress import Compress, CompressRecord
 from .forestprune_addtree import ForestPrune
 from . import forestprune_original
 from . import oc_compress
+from . import ocs_compress

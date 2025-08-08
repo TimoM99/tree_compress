@@ -90,7 +90,7 @@ class AlphaRecord:
     num_removed: int = 0
     num_kept: int = 0
     frac_removed: float = 0.0
-    oc_space_reduction: float = 0.0
+    oc_score: float = 0.0
     fit_time: float = 0.0
 
     intercept: Optional[np.ndarray] = None
@@ -168,7 +168,7 @@ class AlphaSearch:
     def quality_filter(self, records):
         filt = filter(
             lambda r: self.isnotworse_va(r.clf_mvalid)
-            and r.oc_space_reduction < 1.0
+            and r.oc_score <= 1.0
             and not self.isworse_fun(r.clf_mtrain, r.clf_mvalid),  # overfitting
             records,
         )
@@ -213,11 +213,11 @@ class AlphaSearch:
     #     filt = self.quality_filter(self.records)
     #     return max(filt, default=None, key=lambda r: r.frac_removed)
     def get_best_record(self):
-        m = max(self.quality_filter(self.records), default=None, key=lambda r: r.oc_space_reduction)
+        m = max(self.quality_filter(self.records), default=None, key=lambda r: r.oc_score)
         if m is None:
             return None
         
-        allm = [r for r in self.quality_filter(self.records) if r.oc_space_reduction == m.oc_space_reduction]
+        allm = [r for r in self.quality_filter(self.records) if r.oc_score == m.oc_score]
         return allm[-1]
 
 
@@ -231,6 +231,7 @@ class Compress:
         silent: bool = False,
         seed: int = 569,
         fit_intercept: bool = True,
+        k=1
     ):
         self.d = data
         self.silent = silent
@@ -238,6 +239,7 @@ class Compress:
         self.seed = seed
         self.fit_intercept = fit_intercept
         self.alpha_search_round_nsteps = [8, 4, 4]
+        self.k = k
 
         self.score = score
         self.isworse = isworse
@@ -406,9 +408,8 @@ class Compress:
         else:  # multiclass classification
             return (y == target).astype(int)
         
-    def calculate_observable_oc_space(self, at=None):
+    def calculate_oc_score(self, at=None):
         # Find the leaf values
-        oc_space = set()
 
         if at is None:
             at = self.at
@@ -422,9 +423,34 @@ class Compress:
         for i, t in enumerate(at):
             configuration[:, i] = t.eval_node(x)
         # print(configuration)
-        oc_space.update(map(tuple, configuration))
-        return len(oc_space)
-        
+        oc_space = np.unique(configuration, axis=0)
+
+        # Vectorized computation of minimal Hamming distances
+        # For each configuration, compute the minimal Hamming distance to any other configuration
+        # (excluding itself)
+        # oc_space: (n_unique, n_trees), configuration: (n_datapoints, n_trees)
+        # For each row in configuration, find the corresponding row in oc_space (itself), then
+        # compute Hamming distances to all other rows in oc_space
+
+        # Build a mapping from tuple(config) to index in oc_space for fast lookup
+        oc_space_tuples = {tuple(row): idx for idx, row in enumerate(oc_space)}
+        # For each datapoint, find its index in oc_space
+        config_indices = np.array([oc_space_tuples[tuple(row)] for row in configuration])
+
+        # Compute the full Hamming distance matrix between all unique configurations
+        # This is (n_unique, n_unique)
+        # Use broadcasting for efficient computation
+        diffs = oc_space[:, None, :] != oc_space[None, :, :]  # (n_unique, n_unique, n_trees)
+        hamming_matrix = np.sum(diffs, axis=2).astype(float)  # (n_unique, n_unique)
+
+        # Set diagonal to a large value so we don't consider self-distance
+        np.fill_diagonal(hamming_matrix, np.inf)
+
+        # For each datapoint, get the minimal Hamming distance for its configuration
+        k = min(self.k, len(oc_space) - 1)
+        oc_scores = np.sort(hamming_matrix[config_indices], axis=1)[:, k]
+
+        return 1/np.mean(oc_scores)
 
     #TODO fix that it works without timeout as well
     def compress(self, *, max_rounds=2, timeout=7200):
@@ -528,7 +554,7 @@ class Compress:
             yyvalid = self._transformy(target, self.d.yvalid)
             ttransform += time.time() - t
 
-            oc_space_before = self.calculate_observable_oc_space(at)
+            # oc_space_before = self.calculate_oc_score(at)
             alpha_search = AlphaSearch(
                 self.alpha_search_round_nsteps,
                 self.mtrain_fortarget[target],
@@ -547,14 +573,13 @@ class Compress:
                 temp_pruned_at = self.prune_trees(
                     at, alpha_record.intercept, alpha_record.coefs, index
                 )
-                oc_space_after = self.calculate_observable_oc_space(temp_pruned_at)
-                print(f"Alpha {alpha_record.alpha:.4f}, oc space: {oc_space_after} (reduction: {1 - oc_space_after / oc_space_before:.4f})")
+                oc_score = self.calculate_oc_score(temp_pruned_at)
 
-                alpha_record.oc_space_reduction = 1 - oc_space_after/oc_space_before
-
+                alpha_record.oc_score = oc_score
+                # print(f"Alpha {alpha_record.alpha:.4f}, oc score: {oc_score:.4f}")
                 if not self.silent:
                     print_fit(alpha_record, alpha_search)
-            print('-')
+
 
             tsearch = time.time() - tsearch
 
