@@ -419,7 +419,7 @@ class Compress:
         n_datapoints = x.shape[0]
         n_trees = len(at)
         # Each row: one datapoint, each column: leaf id from one tree
-        configuration = np.zeros((n_datapoints, n_trees), dtype=int)
+        configuration = np.zeros((n_datapoints, n_trees), dtype=np.int32)
         for i, t in enumerate(at):
             configuration[:, i] = t.eval_node(x)
         # print(configuration)

@@ -652,6 +652,7 @@ class Compress:
                 clf.fit(xxtrain, yytrain)
         else:
             clf.fit(xxtrain, yytrain)
+
         # print(clf.n_iter_)
         fit_time = time.time() - fit_time
         # print(fit_time)
@@ -760,7 +761,6 @@ class Compress:
         else:
             base_score = intercept[0] if self.fit_intercept else 0.0
             coefs = coefs[0, :]
-
         atp = self._new_empty_addtree(1)
         atpp = atp.copy()
         offset = 0

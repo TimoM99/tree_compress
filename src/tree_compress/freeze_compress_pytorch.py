@@ -1,6 +1,7 @@
 import itertools
 import time
 import gc
+import torch
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -8,7 +9,7 @@ from math import sqrt
 import numpy as np
 import veritas
 from scipy.sparse import csc_matrix, csr_matrix
-from sklearn.linear_model import Lasso, LogisticRegression
+# from sklearn.linear_model import Lasso, LogisticRegression
 from scipy.optimize import minimize
 from scipy.special import expit
 
@@ -221,6 +222,53 @@ class AlphaSearch:
         
         allm = [r for r in self.quality_filter(self.records) if r.frac_removed == m.frac_removed]
         return allm[-1]
+
+class LogisticRegressionPytorch(torch.nn.Module):
+    def __init__(self, dsize, fixed_idx=None, lamda=0.01):
+        super(LogisticRegressionPytorch, self).__init__()
+        n_inputs = dsize - len(fixed_idx)
+        self.fixed_w = np.asarray([v for _, v in fixed_idx], dtype=float)
+        self.fixed_idx = np.asarray([i for i, _ in fixed_idx], dtype=int)
+        self.free_idx = np.array([j for j in range(dsize) if j not in set(fixed_idx)], dtype=int)
+
+        self.linear = torch.nn.Linear(n_inputs, 1, bias=True)
+        self.lamda = lamda
+
+    # make predictions
+    def forward(self, x):
+        c = x[:, self.fixed_idx] @ torch.from_numpy(self.fixed_w).float() if len(self.fixed_idx) else 0.0
+        y_pred = torch.sigmoid(self.linear(x[:, self.free_idx]) + c)
+        
+        return y_pred
+    
+    def fit(self, X, y, num_epochs=1000, learning_rate=0.01):
+        # define loss function and optimizer
+        criterion = torch.nn.BCELoss()
+        optimizer = torch.optim.SGD(self.parameters(), lr=learning_rate)
+        
+        # training loop
+        for epoch in range(num_epochs):
+            # convert numpy arrays to torch tensors
+            inputs = torch.from_numpy(X).float()
+            labels = torch.from_numpy(y).float().view(-1, 1)
+            
+            # zero the parameter gradients
+            optimizer.zero_grad()
+            
+            # forward pass
+            outputs = self.forward(inputs)
+            
+            # compute loss
+            loss = criterion(outputs, labels)
+            reg = sum(p.abs().sum() for name, p in self.named_parameters() if "bias" not in name)
+            loss += self.lamda * reg
+            
+            # backward pass and optimization
+            loss.backward()
+            optimizer.step()
+            
+            if (epoch+1) % 100 == 0:
+                print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
 
 
 class Compress:
@@ -713,7 +761,7 @@ class Compress:
         else:
             logits = X @ w + b
             return expit(logits) > 0.5
-        
+
     def _data_loss_logistic(self, w, b, c, Xf, y):
         n = len(y)
         logits = Xf @ w + c + b
@@ -771,6 +819,7 @@ class Compress:
             L = 1.0
 
 
+
         w, b, k, lam = fista_logistic_fixed_c(Xf, y, c, alpha, L, max_iter, tol, threads=0)
 
         # pack
@@ -795,22 +844,31 @@ class Compress:
         if self.no_convergence_warning:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                res = self.optimize_fixed_prox_l1(xxtrain, yytrain, frozen_indices, alpha_record.alpha, fit_intercept=self.fit_intercept)
+                res = LogisticRegressionPytorch(dsize=xxtrain.shape[1], fixed_idx=frozen_indices, lamda=alpha_record.alpha)
+                res.fit(xxtrain, yytrain, num_epochs=1000, learning_rate=0.01)
         else:
-            res = self.optimize_fixed_prox_l1(xxtrain, yytrain, frozen_indices, alpha_record.alpha, fit_intercept=self.fit_intercept)
+            res = LogisticRegressionPytorch(dsize=xxtrain.shape[1], fixed_idx=frozen_indices, lamda=alpha_record.alpha)
+            res.fit(xxtrain, yytrain, num_epochs=1000, learning_rate=0.01)
+
+        res = res.state_dict()
+        weights = res['linear.weight'].cpu().numpy().flatten()
+        #TODO: This only returns the free weights, make weights be the correct weight vector for the full X vector.
+        intercept = res['linear.bias'].cpu().numpy().flatten()
+        print(weights, intercept)
         # print(clf.n_iter_)
         fit_time = time.time() - fit_time
         # print(fit_time)
 
+        
         # print(res['w'])
         num_params = xxtrain.shape[1]
         # print(num_params, "params in model")
-        num_removed = np.sum(np.abs(res['w']) < 1e-5)
+        num_removed = np.sum(np.abs(weights) < 1e-5)
         # print(num_removed, "params removed")
         frac_removed = num_removed / num_params
 
-        yhat_train = self._refine_predict(res['w'], res['intercept'], xxtrain)
-        yhat_valid = self._refine_predict(res['w'], res['intercept'], xxvalid)
+        yhat_train = self._refine_predict(weights, intercept, xxtrain)
+        yhat_valid = self._refine_predict(weights, intercept, xxvalid)
 
         alpha_record.clf_mtrain = self.score(yytrain, yhat_train)
         alpha_record.clf_mvalid = self.score(yyvalid, yhat_valid)
@@ -821,8 +879,8 @@ class Compress:
         alpha_record.num_removed = num_removed
         alpha_record.num_kept = num_params - num_removed
         alpha_record.frac_removed = frac_removed
-        alpha_record.intercept = np.copy(res['intercept'])
-        alpha_record.coefs = np.copy(res['w'])
+        alpha_record.intercept = np.copy(intercept)
+        alpha_record.coefs = np.copy(weights)
         alpha_record.fit_time = fit_time
 
         return res
@@ -862,55 +920,55 @@ class Compress:
         return f
 
 
-    def _get_regularized_lin_clf(self, xxtrain):
-        self.seed += 1
-        # print(self.seed)
+    # def _get_regularized_lin_clf(self, xxtrain):
+    #     self.seed += 1
+    #     # print(self.seed)
 
-        if self.is_regression():
-            # Use memory-efficient solver settings for large matrices
-            # Disable precompute for large matrices to save memory
-            use_precompute = isinstance(xxtrain, np.ndarray) and xxtrain.shape[1] < 5000
+    #     if self.is_regression():
+    #         # Use memory-efficient solver settings for large matrices
+    #         # Disable precompute for large matrices to save memory
+    #         use_precompute = isinstance(xxtrain, np.ndarray) and xxtrain.shape[1] < 5000
             
             
             
-            return Lasso(
-                fit_intercept=self.fit_intercept,
-                alpha=1.0,
-                random_state=self.seed,
-                max_iter=5000,
-                tol=1e-5,
-                warm_start=True,
-                selection='random',
-                copy_X=False,
-                precompute=use_precompute,
-            )
-        else:
-            # Use memory-efficient settings for large matrices
+    #         return Lasso(
+    #             fit_intercept=self.fit_intercept,
+    #             alpha=1.0,
+    #             random_state=self.seed,
+    #             max_iter=5000,
+    #             tol=1e-5,
+    #             warm_start=True,
+    #             selection='random',
+    #             copy_X=False,
+    #             precompute=use_precompute,
+    #         )
+    #     else:
+    #         # Use memory-efficient settings for large matrices
             
             
             
-            return LogisticRegression(
-                fit_intercept=self.fit_intercept,
-                penalty="l1",
-                C=1.0,
-                solver="liblinear",
-                max_iter=5000,
-                tol=1e-5,
-                n_jobs=1,
-                random_state=self.seed,
-                warm_start=True,
-            )
+    #         return LogisticRegression(
+    #             fit_intercept=self.fit_intercept,
+    #             penalty="l1",
+    #             C=1.0,
+    #             solver="liblinear",
+    #             max_iter=5000,
+    #             tol=1e-5,
+    #             n_jobs=1,
+    #             random_state=self.seed,
+    #             warm_start=True,
+    #         )
 
-    def _update_lin_clf_alpha(self, clf, alpha):
-        if alpha <= 0.0:
-            raise RuntimeError("alpha == 0.0?")
+    # def _update_lin_clf_alpha(self, clf, alpha):
+    #     if alpha <= 0.0:
+    #         raise RuntimeError("alpha == 0.0?")
 
-        if self.is_regression():
-            assert isinstance(clf, Lasso)
-            clf.alpha = 0.0001 * alpha
-        else:
-            assert clf.penalty == "l1"
-            clf.C = 1.0 / alpha
+    #     if self.is_regression():
+    #         assert isinstance(clf, Lasso)
+    #         clf.alpha = 0.0001 * alpha
+    #     else:
+    #         assert clf.penalty == "l1"
+    #         clf.C = 1.0 / alpha
 
     def _new_empty_addtree(self, num_leaf_values):
         if self.is_regression():
@@ -1228,3 +1286,4 @@ def fista_logistic_fixed_c(
         threadpool_ctx.__exit__(None, None, None)
 
     return w, b, k, lam
+
