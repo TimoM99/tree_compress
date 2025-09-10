@@ -853,7 +853,7 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
     torch.manual_seed(seed)
     random.seed(seed)
 
-    penalties = ['lop-oc-1', 'lop-oc-10', 'lop-oc-100']
+    penalties = ['lop-oc-0.2', 'lop']
     
     d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
     model_class = d.get_model_class(model_type)
@@ -937,14 +937,14 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
                     dtest.X.to_numpy(), dtest.y.to_numpy(),
                     dvalid.X.to_numpy(), dvalid.y.to_numpy())
             
-                compr = tree_compress.ocs_compress.Compress(
+                compr = tree_compress.freeze_compress.Compress(
                             data,
                             at_orig,
                             score=balanced_accuracy_score,
                             isworse=lambda v, ref: ref-v > abserr,
                             seed=5823,
                             silent=silent,
-                            k=int(penalty.split('-')[-1])
+                            frozen_pct=float(penalty.split('-')[-1])
                         )
                 compr.no_convergence_warning = True
                 at_refined = compr.compress(max_rounds=2, timeout=timeout)
@@ -971,6 +971,94 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
         if not silent:
             __import__('pprint').pprint(results)
         print(json.dumps(results))
+
+@cli.command("count_ocs")
+@click.argument("dname")
+@click.option("--save", is_flag=True, default=False)
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=21600)
+def compression_cmd(dname, save, seed, silent, timeout):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    import json
+
+    results_horse_race = {}
+    
+    with open('results/xgb_classification_saved.txt', 'r') as file: #Load in the XGB classification results
+        for line in file:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname:
+                continue
+            key = f"{line_dict['dname']}_{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}_{line_dict['fold']}"
+            results_horse_race[key] = line_dict
+
+    for key, result in results_horse_race.items():
+        d, dtrain, _, dtest = util.get_dataset(dname, seed, int(key.split('_')[-1]), silent)
+
+        at = veritas.AddTree.from_json(result['model_json'])
+
+        result['oc_score_training'] = calculate_oc_score(x=dtrain.X.to_numpy(), y=dtrain.y.to_numpy(), at=at)
+        result['oc_score_test'] = calculate_oc_score(x=dtest.X.to_numpy(), y=dtest.y.to_numpy(), at=at)
+
+        result['observed_oc_space_training'] = calculate_observable_oc_space(x=dtrain.X.to_numpy(), at=at)
+        result['observed_oc_space_test'] = calculate_observable_oc_space(x=dtest.X.to_numpy(), at=at)
+
+        result['oc_space'] = count_ocs(at, timeout=21600)
+
+        if not silent:
+            __import__('pprint').pprint(result)
+        print(json.dumps(result))
+
+def calculate_oc_score(x, y, at):
+    """
+    Calculates the oc-score per class.
+    Returns a dict: {class_label: oc_score}
+    """
+    n_datapoints = x.shape[0]
+    n_trees = len(at)
+    configuration = np.zeros((n_datapoints, n_trees), dtype=np.int32)
+    for i, t in enumerate(at):
+        configuration[:, i] = t.eval_node(x)
+
+    classes = np.unique(y)
+    oc_scores_per_class = {}
+
+    for cls in classes:
+        idx = np.where(y == cls)[0]
+        if len(idx) <= 1:
+            oc_scores_per_class[cls] = np.nan
+            continue
+
+        config_cls = configuration[idx]
+        oc_space = np.unique(config_cls, axis=0)
+
+        if len(oc_space) <= 1:
+            oc_scores_per_class[cls] = np.nan
+            continue
+
+        oc_space_tuples = {tuple(row): i for i, row in enumerate(oc_space)}
+        config_indices = np.array([oc_space_tuples[tuple(row)] for row in config_cls])
+
+        diffs = oc_space[:, None, :] != oc_space[None, :, :]
+        hamming_matrix = np.sum(diffs, axis=2).astype(float)
+        np.fill_diagonal(hamming_matrix, np.inf)
+
+        ks = [1, 10, 100, 1000]  # You can adjust or parameterize these k values as needed
+        oc_scores_dict = {}
+        for k in ks:
+            if hamming_matrix.shape[1] > k:
+                oc_scores = np.sort(hamming_matrix[config_indices], axis=1)[:, k]
+                oc_scores_dict[f"oc_score_k{k}"] = np.mean(oc_scores)
+            else:
+                oc_scores_dict[f"oc_score_k{k}"] = np.nan
+        oc_scores_per_class[str(cls)] = oc_scores_dict
+
+    return oc_scores_per_class
 
 def calculate_observable_oc_space(x, at):
         # Find the leaf values
