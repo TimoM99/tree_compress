@@ -13,6 +13,7 @@ import tree_compress
 import time
 import psutil
 import gc
+from verification import run_verification_tasks
 from sklearn.metrics import balanced_accuracy_score, mean_squared_error
 
 def get_memory_usage():
@@ -24,6 +25,23 @@ def print_memory(label):
     """Print current memory usage"""
     memory_mb = get_memory_usage()
     print(f"{label}: {memory_mb:.1f} MB")
+
+def feature_usage(at):
+    original_features = set()
+    for tree in at:
+        def extract_features_recursive(node):
+            if tree.is_leaf(node):
+                return
+            else:
+                split = tree.get_split(node)
+                original_features.add(split.feat_id)
+                left_child = tree.left(node)
+                right_child = tree.right(node)
+                extract_features_recursive(left_child)
+                extract_features_recursive(right_child)
+
+        extract_features_recursive(tree.root())
+    return original_features
 
 print_memory("Start")
 
@@ -39,8 +57,8 @@ params = {
         "random_state": seed,
         "n_jobs": 1,
         "nthread": 1,
-        "n_estimators": 25,
-        "max_depth": 6,
+        "n_estimators": 10,
+        "max_depth": 4,
         "learning_rate": 0.1,
         "subsample": 1.0,
         "tree_method": "hist",
@@ -62,6 +80,22 @@ model_class = d.get_model_class(model_type)
 # Fit XGB model
 clf, _ = dtrain.train(model_class, params)
 at_orig = veritas.get_addtree(clf, silent=silent)
+
+def bound_oc_space(at):
+    splits = at.get_splits()
+    bound_1 = 1
+    for _, f_values in splits.items():
+        bound_1 *= (len(f_values) + 1)
+
+    bound_2 = 1
+    for t in at:
+        bound_2 *= (t.num_leaves())
+    return bound_1, bound_2
+        
+
+print(bound_oc_space(at_orig))
+
+# print(len(feature_usage(at_orig)))
 
 
 data = tree_compress.Data(
@@ -89,7 +123,7 @@ print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_n
 #         )
 
 # print_memory("After LassoCompress init")
- 
+
 # compr.no_convergence_warning = True
 # at_refined_1 = compr.compress(max_rounds=2)
 # best_alpha_1 = compr.records[-1].alpha
@@ -107,20 +141,20 @@ print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_n
 # Compress xgb model using OC Compress (Observable Coverage based)
 print_memory("Before OC Compress")
 start_time = time.time()
-compr_oc = tree_compress.ocs_compress.Compress(
+compr_oc = tree_compress.freeze_compress_pytorch.Compress(
             data,
             at_orig,
             score=score,
             isworse=is_worse,
             seed=5823,
             silent=True,
-            k=100
+            frozen_pct=0.2,  # Percentage of features to freeze at every level
         )
 
 print_memory("After OC Compress init")
 compr_oc.no_convergence_warning = True
 at_refined_oc = compr_oc.compress(max_rounds=2)
-best_alpha_oc = compr_oc.records[-1].alphas
+# at_refined_oc = at_orig
 compr_time_oc = time.time() - start_time
 print_memory("After OC Compress compression")
 print(f"OC Compress time: {compr_time_oc:.2f}s")
@@ -146,19 +180,35 @@ compr = tree_compress.Compress(
 
 print_memory("After Compress init")
 compr.no_convergence_warning = True
-at_refined_2 = compr.compress(max_rounds=2)
-best_alpha_2 = compr.records[-1].alphas
-compr_time_2 = time.time() - start_time
+at_refined_lop = compr.compress(max_rounds=2)
+compr_time_lop = time.time() - start_time
 print_memory("After Compress compression")
-print(f"Compress time: {compr_time_2:.2f}s")
+print(f"Compress time: {compr_time_lop:.2f}s")
 for rec in compr.records:
     print(rec.alphas, rec.ntrees, rec.nleafs, rec.tindex, rec.tsearch, rec.ttransform)
 
 print_memory("Final memory usage")
 
-print(f"Compression times: OC Compress={compr_time_oc:.2f}s, Compress={compr_time_2:.2f}s")
-print(f"Trees: orig={at_orig.num_leafs()}, refined_OC={at_refined_oc.num_leafs()}refined_2={at_refined_2.num_leafs()}")
-print(f"Alphas: refined_2={best_alpha_2}")
-print(f"Metrics: orig={dtest.metric(at_orig):.4f}, refined_2={dtest.metric(at_refined_2):.4f}")
+verification_results_orig = run_verification_tasks(at_orig, dtest.X, dtest.y, timeout=1800, n=500)
+verification_results_oc = run_verification_tasks(at_refined_oc, dtest.X, dtest.y, timeout=1800, n=500)
+verification_results_lop = run_verification_tasks(at_refined_lop, dtest.X, dtest.y, timeout=1800, n=500)
 
-print(f"Base scores: refined_2={at_refined_2.get_base_score(0)}")
+print(f"Compression times: OC Compress={compr_time_oc:.2f}s, Compress={compr_time_lop:.2f}s")
+print(f"Leafs: orig={at_orig.num_leafs()}, refined_OC={at_refined_oc.num_leafs()}, refined_Lop={at_refined_lop.num_leafs()}")
+print(f"Trees: orig={len(at_orig)}, refined_OC={len(at_refined_oc)}, refined_Lop={len(at_refined_lop)}")
+print(f"Test scores: orig={score(dtest.y, at_orig.predict(dtest.X)>0.5)}, refined_OC={score(dtest.y, at_refined_oc.predict(dtest.X)>0.5)}, refined_Lop={score(dtest.y, at_refined_lop.predict(dtest.X)>0.5)}")
+print(f"Valid scores: orig={score(dvalid.y, at_orig.predict(dvalid.X)>0.5)}, refined_OC={score(dvalid.y, at_refined_oc.predict(dvalid.X)>0.5)}, refined_Lop={score(dvalid.y, at_refined_lop.predict(dvalid.X)>0.5)}")
+print(f"Base scores: orig={at_orig.get_base_score(0)}, refined_OC={at_refined_oc.get_base_score(0)}, refined_Lop={at_refined_lop.get_base_score(0)}")
+
+
+
+print(f"Features used: orig={len(feature_usage(at_orig))}, refined_OC={len(feature_usage(at_refined_oc))}, refined_Lop={len(feature_usage(at_refined_lop))}")
+print("Verification results (orig, OC, Lop):")
+for key in verification_results_orig.keys():
+    res_orig = verification_results_orig[key]
+    res_oc = verification_results_oc.get(key, None)
+    res_lop = verification_results_lop.get(key, None)
+    print(f"  {key}: orig={res_orig}, OC={res_oc}, Lop={res_lop}")
+
+
+

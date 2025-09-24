@@ -1,0 +1,14 @@
+
+Gurobi 12.0.1 (linux64, gurobi_cl) logging started Wed Sep  3 10:52:48 2025
+
+Set parameter LogFile to value "gurobi.log"
+Using license file /cw/dtaijupiter/NoCsBack/dtai/timo/miniconda3/envs/treecompress/lib/gurobi.lic
+Restricted license - for non-production use only - expires 2026-11-23
+
+Gurobi 12.0.1 (linux64, gurobi_cl) logging started Wed Sep  3 10:53:28 2025
+
+Set parameter Username
+Set parameter LicenseID to value 2700663
+Set parameter LogFile to value "gurobi.log"
+Using license file /cw/dtailocal/timo/gurobi.lic
+Academic license - for non-commercial use only - expires 2026-08-28

@@ -5,9 +5,9 @@ def get_params_xgb(d):
         "random_state": d.seed + 9348,
         "n_jobs": 1,
         "nthread": 1,
-        "n_estimators": [10, 25, 50, 100],
-        "max_depth": [4, 6, 8],
-        "learning_rate": [0.1],
+        "n_estimators": [5, 10],
+        "max_depth": [2,4,6],
+        "learning_rate": [0.1, 0.25, 0.5, 1.0],
         "subsample": [1.0],
         "tree_method": "hist",
     }
