@@ -43,6 +43,7 @@ def approx_emp_robustness(at, example, target_label, max_delta):
 def exact_emp_robustness(at, example, target_label, max_delta):
     from gurobipy import GRB
 
+    # By putting a box around the example, we make the search space smaller.
     box = [veritas.Interval(x-max_delta, x+max_delta) for x in example]
     at_pruned = at.prune(box)
     kan = veritas.KantchelianAttack(at_pruned, target_label, example)
