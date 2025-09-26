@@ -1,29 +1,40 @@
 import os
+from unittest import result
 os.environ['PRADA_DATA_DIR']='/cw/dtaijupiter/NoCsBack/dtai/timo/prada_data'
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+# os.environ["OMP_NUM_THREADS"] = "1"
+# os.environ["OPENBLAS_NUM_THREADS"] = "1"
+# os.environ["MKL_NUM_THREADS"] = "1"
+# os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+# os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 
 import numpy as np
+import time
 import random
 from sklearn.metrics import balanced_accuracy_score, mean_squared_error
 import util
 import veritas
-
+from veritas import Solution
 
 def min_dist_to_solutions(example, solutions):
     min_dist = float('inf')
+    dt = 0.0
     for sol in solutions:
+        start = time.time()
         closest = veritas.get_closest_example(sol, example, eps=0.0)
+        # print(closest)
+        # closest = get_closest_example_alt(sol, example, eps=0.0)
+        # closest = get_closest_example_alt(sol, example, eps=0.0)
+        # print(closest_alt)
+        # assert np.allclose(closest, closest_alt)
+        dt += time.time() - start
+        #TODO We can make this faster by including it in get_closest_example
         dist = np.max(np.abs(example - closest))
         if dist < min_dist:
             min_dist = dist
-    return min_dist
+    return min_dist, dt
 
-def exact_emp_robustness(at, example, target_label, max_delta):
+def exact_emp_robustness(at, example, target_label):
     from gurobipy import GRB
 
     # box = [veritas.Interval(x-max_delta, x+max_delta) for x in example]
@@ -38,6 +49,90 @@ def exact_emp_robustness(at, example, target_label, max_delta):
     # except IndexError:
     #     return max_delta
 
+def get_closest_example_alt(solution_or_box, example, eps):
+    # num_attributes = len(example)
+
+    if isinstance(solution_or_box, Solution):
+        box = solution_or_box.box()
+    elif isinstance(solution_or_box, list):
+        if isinstance(solution_or_box[0], tuple):
+            box = {x[0]: x[1] for x in solution_or_box}
+        else:
+            box = {i: x for i, x in enumerate(solution_or_box)}
+    elif isinstance(solution_or_box, dict):
+        box = solution_or_box
+    else:
+        raise ValueError("invalid first argument")
+
+    lower = np.zeros(len(box))
+    upper = np.zeros(len(box))
+    indices = np.zeros(len(box))
+    # print(box)
+    # print(example)
+    for i, interval in enumerate(box.items()):
+        index, dom = interval
+        #TODO This is not the proper way to handle unbounded domains, but might work because of normalized data
+        # We do this so that we can know when an instance falls in the interval or outside.
+        lower[i] = max(dom.lo - eps, -10)
+        upper[i] = min(dom.hi + eps, 10)
+        indices[i] = index
+        indices = indices.astype(int)
+
+    # print(lower, upper)
+    dist_lower = np.abs(lower - example[indices])
+    dist_upper = np.abs(upper - example[indices])
+
+    # print(dist_lower, dist_upper)
+    closest = np.where(dist_lower < dist_upper, lower, upper)
+    # print(closest)
+    closest = np.where(np.isclose(np.abs(dist_lower - dist_upper), np.abs(lower - upper)), closest, example[indices])
+
+    result = example.copy()
+    result[indices] = closest
+    # print(closest)
+    return result
+
+# def get_closest_example_hybrid(solution_or_box, example, eps, featmap=None):
+#     num_attributes = len(example)
+
+#     if featmap is None:
+#         featmap = {i: [i] for i in range(num_attributes)}
+#     else:
+#         featmap = featmap.get_indices_map()
+
+#     closest = example.copy()
+
+#     # unify into dict of {index: domain}
+#     if isinstance(solution_or_box, Solution):
+#         box = solution_or_box.box()
+#     elif isinstance(solution_or_box, list):
+#         if isinstance(solution_or_box[0], tuple):
+#             box = {x[0]: x[1] for x in solution_or_box}
+#         else:
+#             box = {i: x for i, x in enumerate(solution_or_box)}
+#     elif isinstance(solution_or_box, dict):
+#         box = solution_or_box
+#     else:
+#         raise ValueError("invalid first argument")
+
+#     for index, dom in box.items():
+#         feats = featmap[index]
+#         vals = example[feats]
+
+#         # mask: which entries are outside [lo, hi)
+#         mask_lo = vals < dom.lo
+#         mask_hi = vals >= dom.hi
+
+#         # update only where needed
+#         if np.any(mask_lo):
+#             closest[feats[mask_lo]] = dom.lo
+#         if np.any(mask_hi):
+#             closest[feats[mask_hi]] = dom.hi - eps
+
+#     return closest
+
+
+
 
 seed = 7
 model_type = 'xgb'
@@ -50,9 +145,9 @@ params = {
         "random_state": seed,
         "n_jobs": 1,
         "nthread": 1,
-        "n_estimators": 5,
+        "n_estimators": 10,
         "max_depth": 4,
-        "learning_rate": 0.1,
+        "learning_rate": 0.25,
         "subsample": 1.0,
         "tree_method": "hist",
     }
@@ -97,6 +192,7 @@ while True:
 out_of_resources = has_timed_out or oom
 
 print("Num solutions:", search.num_solutions())
+
 pos_solutions = []
 neg_solutions = []
 
@@ -110,15 +206,29 @@ while s:
         s = False
     i += 1
 
+# for sol in pos_solutions:
+    # print(len(sol.box()))
 print(len(pos_solutions), len(neg_solutions))
+print("Num leafs: ", at_orig.num_leafs())
+print("Num leafs per tree:")
+for t in at_orig:
+    print(t.num_leaves(), end=' ')
+nb_splits_per_feature = list(map(lambda y: len(y), at_orig.get_splits().values()))
+print('\nNb splits per feature', nb_splits_per_feature)
+print('Bound on #solutions:', np.prod(np.array(nb_splits_per_feature) + 1))
 
-n = 500
+
+
+
+n = 100
 count = 0
 
 x = dtest.X
 y = dtest.y
 
+start_time = time.time()
 delta_tot = 0.0
+dtt = 0.0
 for i in x.index:
     target_label = not (y.loc[i] > 0.0)
     example = x.loc[i, :].to_numpy()
@@ -128,10 +238,11 @@ for i in x.index:
     if pred_label != target_label:
         if target_label:
             # Find minimum distance to all positive solutions
-            min_dist = min_dist_to_solutions(example, pos_solutions)
+            min_dist, dt = min_dist_to_solutions(example, pos_solutions)
         else:
             # Find minimum distance to all negative solutions
-            min_dist = min_dist_to_solutions(example, neg_solutions)
+            min_dist, dt = min_dist_to_solutions(example, neg_solutions)
+        dtt += dt
         delta_tot += min_dist
         count += 1
         if count > n:
@@ -139,4 +250,25 @@ for i in x.index:
         # print(min_dist, exact_emp_robustness(at_orig, example, target_label, max_delta=1.0))
         # assert np.isclose(min_dist, exact_emp_robustness(at_orig, example, target_label, max_delta=1.0), atol=1e-4)
 
-print("Avg delta:", delta_tot/count)
+print("Avg delta linear scan:", delta_tot/count)
+print("Time in veritas.get_closest_example:", dtt)
+print('Time linear scan:', time.time() - start_time)
+
+start_time = time.time()
+delta_tot = 0.0
+count = 0
+for i in x.index:
+    target_label = not (y.loc[i] > 0.0)
+    example = x.loc[i, :].to_numpy()
+    pred_label = at_orig.eval(example)[0, 0] > 0.0
+
+
+    if pred_label != target_label:
+        min_dist = exact_emp_robustness(at_orig, example, target_label)
+        delta_tot += min_dist
+        count += 1
+        if count > n:
+            break
+
+print("Avg delta exact:", delta_tot/count)
+print('Time exact:', time.time() - start_time)
