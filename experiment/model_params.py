@@ -15,31 +15,9 @@ def get_params_xgb(d):
     if d.is_multiclass():
         params["objective"] = "multi:softmax"
         params["num_class"] = d.num_classes
-        #params["multi_strategy"] = "multi_output_tree"
 
     return params
     
-
-# def get_params_xgb_optimal_dt(d):
-#     params = {
-#         "random_state": d.seed + 9348,
-#         "n_jobs": 1,
-#         "nthread": 1,
-#         "n_estimators": [10],
-#         "max_depth": [3],
-#         #"max_leaves": [2**4, 2**6, 2**8],
-#         "learning_rate": [0.1],
-#         "subsample": [1.0],
-#         #"colsample_bytree": [0.5, 0.75, 1.0],
-#         "tree_method": "hist",
-#     }
-
-#     if d.is_multiclass():
-#         params["objective"] = "multi:softmax"
-#         params["num_class"] = d.num_classes
-#         #params["multi_strategy"] = "multi_output_tree"
-
-#     return params
 
 def get_params_xgb_small(d, ntrees, nnodes, nnzleafs):
     n_estimators = np.unique([int(0.5 * ntrees), int(0.75 * ntrees), int(ntrees)])

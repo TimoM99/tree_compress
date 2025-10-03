@@ -22,11 +22,6 @@ def min_dist_to_solutions(example, solutions):
     for sol in solutions:
         start = time.time()
         closest = veritas.get_closest_example(sol, example, eps=0.0)
-        # print(closest)
-        # closest = get_closest_example_alt(sol, example, eps=0.0)
-        # closest = get_closest_example_alt(sol, example, eps=0.0)
-        # print(closest_alt)
-        # assert np.allclose(closest, closest_alt)
         dt += time.time() - start
         #TODO We can make this faster by including it in get_closest_example
         dist = np.max(np.abs(example - closest))
@@ -37,72 +32,16 @@ def min_dist_to_solutions(example, solutions):
 def exact_emp_robustness(at, example, target_label):
     from gurobipy import GRB
 
-    # box = [veritas.Interval(x-max_delta, x+max_delta) for x in example]
-    # at_pruned = at.prune(box)
     kan = veritas.KantchelianAttack(at, target_label, example)
     kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
     kan.model.setParam(GRB.Param.Threads, 1)
     kan.optimize()
     return kan.bounds[-1][0]
-    # try:
-    #     return min(max_delta, kan.bounds[-1][0])
-    # except IndexError:
-    #     return max_delta
 
-def get_closest_example_alt(solution_or_box, example, eps):
-    # num_attributes = len(example)
+# TODO This is an alternative implementation of get_closest_example that does not work as well as the one in veritas.
+# Parallellization does not help much because it requires more steps than the couple of if-statements in veritas.get_closest_example
+# def get_closest_example_alt(solution_or_box, example, eps):
 
-    if isinstance(solution_or_box, Solution):
-        box = solution_or_box.box()
-    elif isinstance(solution_or_box, list):
-        if isinstance(solution_or_box[0], tuple):
-            box = {x[0]: x[1] for x in solution_or_box}
-        else:
-            box = {i: x for i, x in enumerate(solution_or_box)}
-    elif isinstance(solution_or_box, dict):
-        box = solution_or_box
-    else:
-        raise ValueError("invalid first argument")
-
-    lower = np.zeros(len(box))
-    upper = np.zeros(len(box))
-    indices = np.zeros(len(box))
-    # print(box)
-    # print(example)
-    for i, interval in enumerate(box.items()):
-        index, dom = interval
-        #TODO This is not the proper way to handle unbounded domains, but might work because of normalized data
-        # We do this so that we can know when an instance falls in the interval or outside.
-        lower[i] = max(dom.lo - eps, -10)
-        upper[i] = min(dom.hi + eps, 10)
-        indices[i] = index
-        indices = indices.astype(int)
-
-    # print(lower, upper)
-    dist_lower = np.abs(lower - example[indices])
-    dist_upper = np.abs(upper - example[indices])
-
-    # print(dist_lower, dist_upper)
-    closest = np.where(dist_lower < dist_upper, lower, upper)
-    # print(closest)
-    closest = np.where(np.isclose(np.abs(dist_lower - dist_upper), np.abs(lower - upper)), closest, example[indices])
-
-    result = example.copy()
-    result[indices] = closest
-    # print(closest)
-    return result
-
-# def get_closest_example_hybrid(solution_or_box, example, eps, featmap=None):
-#     num_attributes = len(example)
-
-#     if featmap is None:
-#         featmap = {i: [i] for i in range(num_attributes)}
-#     else:
-#         featmap = featmap.get_indices_map()
-
-#     closest = example.copy()
-
-#     # unify into dict of {index: domain}
 #     if isinstance(solution_or_box, Solution):
 #         box = solution_or_box.box()
 #     elif isinstance(solution_or_box, list):
@@ -115,28 +54,34 @@ def get_closest_example_alt(solution_or_box, example, eps):
 #     else:
 #         raise ValueError("invalid first argument")
 
-#     for index, dom in box.items():
-#         feats = featmap[index]
-#         vals = example[feats]
+#     lower = np.zeros(len(box))
+#     upper = np.zeros(len(box))
+#     indices = np.zeros(len(box))
 
-#         # mask: which entries are outside [lo, hi)
-#         mask_lo = vals < dom.lo
-#         mask_hi = vals >= dom.hi
+#     for i, interval in enumerate(box.items()):
+#         index, dom = interval
+#         #TODO This is not the proper way to handle unbounded domains, but might work because of normalized data
+#         # We do this so that we can know when an instance falls in the interval or outside.
+#         lower[i] = max(dom.lo - eps, -10)
+#         upper[i] = min(dom.hi + eps, 10)
+#         indices[i] = index
+#         indices = indices.astype(int)
 
-#         # update only where needed
-#         if np.any(mask_lo):
-#             closest[feats[mask_lo]] = dom.lo
-#         if np.any(mask_hi):
-#             closest[feats[mask_hi]] = dom.hi - eps
+#     dist_lower = np.abs(lower - example[indices])
+#     dist_upper = np.abs(upper - example[indices])
 
-#     return closest
+#     closest = np.where(dist_lower < dist_upper, lower, upper)
+#     closest = np.where(np.isclose(np.abs(dist_lower - dist_upper), np.abs(lower - upper)), closest, example[indices])
 
+#     result = example.copy()
+#     result[indices] = closest
+#     return result
 
 
 
 seed = 7
 model_type = 'xgb'
-dname = 'California'
+dname = 'Adult'
 regression = False  # Set to True for regression, False for classification
 abserr = 0.005
 fold = 1
@@ -146,8 +91,8 @@ params = {
         "n_jobs": 1,
         "nthread": 1,
         "n_estimators": 10,
-        "max_depth": 4,
-        "learning_rate": 0.25,
+        "max_depth": 6,
+        "learning_rate": 0.1,
         "subsample": 1.0,
         "tree_method": "hist",
     }
@@ -163,7 +108,6 @@ np.random.seed(seed)
 random.seed(seed)
 
 d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
-print(dtrain.X)
 model_class = d.get_model_class(model_type)
 
 # Fit XGB model
@@ -202,12 +146,12 @@ while s:
     try:
         sol = search.get_solution(i)
         pos_solutions.append(sol) if sol.output > 0 else neg_solutions.append(sol)
+        
     except IndexError:
         s = False
     i += 1
 
-# for sol in pos_solutions:
-    # print(len(sol.box()))
+
 print(len(pos_solutions), len(neg_solutions))
 print("Num leafs: ", at_orig.num_leafs())
 print("Num leafs per tree:")
@@ -217,9 +161,7 @@ nb_splits_per_feature = list(map(lambda y: len(y), at_orig.get_splits().values()
 print('\nNb splits per feature', nb_splits_per_feature)
 print('Bound on #solutions:', np.prod(np.array(nb_splits_per_feature) + 1))
 
-
-
-
+# Linear scan over OC space
 n = 100
 count = 0
 
@@ -247,13 +189,12 @@ for i in x.index:
         count += 1
         if count > n:
             break
-        # print(min_dist, exact_emp_robustness(at_orig, example, target_label, max_delta=1.0))
-        # assert np.isclose(min_dist, exact_emp_robustness(at_orig, example, target_label, max_delta=1.0), atol=1e-4)
 
 print("Avg delta linear scan:", delta_tot/count)
 print("Time in veritas.get_closest_example:", dtt)
 print('Time linear scan:', time.time() - start_time)
 
+# Exact verification MILP using Kantchelian et al.
 start_time = time.time()
 delta_tot = 0.0
 count = 0

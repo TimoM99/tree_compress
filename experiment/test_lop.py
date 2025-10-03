@@ -11,20 +11,9 @@ import util
 import veritas
 import tree_compress
 import time
-import psutil
-import gc
 from verification import run_verification_tasks
 from sklearn.metrics import balanced_accuracy_score, mean_squared_error
 
-def get_memory_usage():
-    """Get current memory usage in MB"""
-    process = psutil.Process(os.getpid())
-    return process.memory_info().rss / 1024 / 1024
-
-def print_memory(label):
-    """Print current memory usage"""
-    memory_mb = get_memory_usage()
-    print(f"{label}: {memory_mb:.1f} MB")
 
 def feature_usage(at):
     original_features = set()
@@ -42,9 +31,6 @@ def feature_usage(at):
 
         extract_features_recursive(tree.root())
     return original_features
-
-print_memory("Start")
-
 
 seed = 7
 model_type = 'xgb'
@@ -91,11 +77,6 @@ def bound_oc_space(at):
     for t in at:
         bound_2 *= (t.num_leaves())
     return bound_1, bound_2
-        
-
-print(bound_oc_space(at_orig))
-
-# print(len(feature_usage(at_orig)))
 
 
 data = tree_compress.Data(
@@ -103,45 +84,13 @@ data = tree_compress.Data(
                     dtest.X.to_numpy(), dtest.y.to_numpy(),
                     dvalid.X.to_numpy(), dvalid.y.to_numpy())
 
-print_memory("After data loading")
 print(f"Data shapes: train={dtrain.X.shape}, test={dtest.X.shape}, valid={dvalid.X.shape}")
 print(f"Model: {len(at_orig)} trees, {at_orig.num_leafs()} leafs, {at_orig.num_nodes()} nodes")
 
 
-
-# # # Compress xgb model using OC compress
-# print_memory("Before OC Compress")
-# start_time = time.time()
-# compr = tree_compress.LassoCompress( # For binary classification, use LassoCompress.
-#             data,
-#             at_orig,
-#             metric=score,
-#             isworse=is_worse,
-#             linclf_type='LogisticRegression',
-#             seed=5823,
-#             silent=silent
-#         )
-
-# print_memory("After LassoCompress init")
-
-# compr.no_convergence_warning = True
-# at_refined_1 = compr.compress(max_rounds=2)
-# best_alpha_1 = compr.records[-1].alpha
-# compr_time_1 = time.time() - start_time
-# print_memory("After LassoCompress compression")
-# print(f"LassoCompress time: {compr_time_1:.2f}s")
-# for rec in compr.records:
-#     print(rec.alpha, rec.ntrees, rec.nleafs, rec.tmapping, rec.tsearch, rec.ttransform)
-
-# # Force garbage collection to free memory
-# del compr, at_refined_1
-# gc.collect()
-# print_memory("After LassoCompress cleanup")
-
-# Compress xgb model using OC Compress (Observable Coverage based)
-print_memory("Before OC Compress")
+# Compress xgb model, freezing some trees based on feature usage.
 start_time = time.time()
-compr_oc = tree_compress.freeze_compress_pytorch.Compress(
+compr_oc = tree_compress.freeze_compress.Compress(
             data,
             at_orig,
             score=score,
@@ -151,23 +100,17 @@ compr_oc = tree_compress.freeze_compress_pytorch.Compress(
             frozen_pct=0.2,  # Percentage of features to freeze at every level
         )
 
-print_memory("After OC Compress init")
 compr_oc.no_convergence_warning = True
 at_refined_oc = compr_oc.compress(max_rounds=2)
-# at_refined_oc = at_orig
 compr_time_oc = time.time() - start_time
-print_memory("After OC Compress compression")
 print(f"OC Compress time: {compr_time_oc:.2f}s")
 for rec in compr_oc.records:
     print(rec.alphas, rec.ntrees, rec.nleafs, rec.tindex, rec.tsearch, rec.ttransform)
-
-print_memory("After OC Compress cleanup")
 
 # Compress xgb model using LOP
 np.random.seed(seed)
 random.seed(seed)
 
-print_memory("Before Compress")
 start_time = time.time()
 compr = tree_compress.Compress(
             data,
@@ -178,16 +121,12 @@ compr = tree_compress.Compress(
             silent=True
         )
 
-print_memory("After Compress init")
 compr.no_convergence_warning = True
 at_refined_lop = compr.compress(max_rounds=2)
 compr_time_lop = time.time() - start_time
-print_memory("After Compress compression")
 print(f"Compress time: {compr_time_lop:.2f}s")
 for rec in compr.records:
     print(rec.alphas, rec.ntrees, rec.nleafs, rec.tindex, rec.tsearch, rec.ttransform)
-
-print_memory("Final memory usage")
 
 verification_results_orig = run_verification_tasks(at_orig, dtest.X, dtest.y, timeout=1800, n=500)
 verification_results_oc = run_verification_tasks(at_refined_oc, dtest.X, dtest.y, timeout=1800, n=500)
