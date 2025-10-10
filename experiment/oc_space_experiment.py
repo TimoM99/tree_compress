@@ -109,11 +109,12 @@ def compression_cmd(dname, save, seed, silent, timeout, fold, model_type, abserr
                 'memory_usage': 25*(model.num_nodes() + model.num_leafs()),
                 'model_json': model.to_json() if save else None,
                 'nleafs': model.num_leafs(),
+                'nnodes': model.num_nodes(),
                 'observed_oc_space_training': calculate_observable_oc_space(x=dtrain.X.to_numpy(), at=model),
                 'observed_oc_space_test': calculate_observable_oc_space(x=dtest.X.to_numpy(), at=model),
                 'oc_score_training': calculate_oc_score(x=dtrain.X.to_numpy(), y=dtrain.y.to_numpy(), at=model),
                 'oc_score_test': calculate_oc_score(x=dtest.X.to_numpy(), y=dtest.y.to_numpy(), at=model),
-                'oc_space': count_ocs(model, timeout=timeout),
+                # 'oc_space': count_ocs(model, timeout=timeout),
                 'oc_space_bound': bound_oc_space(model),
                 'mtest': dtest.metric(model),
                 'mvalid': dvalid.metric(model),
@@ -195,3 +196,8 @@ def calculate_observable_oc_space(x, at):
         # print(configuration)
         oc_space.update(map(tuple, configuration))
         return len(oc_space)
+
+
+
+if __name__ == "__main__":
+    cli()

@@ -1,5 +1,9 @@
+from functools import partial
 import time
+from unittest import result
 import veritas
+from numba import njit
+import numpy as np
 
 def count_ocs(at, timeout):
     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
@@ -24,8 +28,71 @@ def count_ocs(at, timeout):
     out_of_resources = has_timed_out or oom
     return search.num_solutions(), search.time_since_start(), out_of_resources
 
+def find_ocs(at, timeout):
+    config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
+    config.stop_when_optimal = False
+    config.max_memory = 16*1024*1024*1024
+    search = config.get_search(at)
 
-def approx_emp_robustness(at, example, target_label, max_delta):
+    has_timed_out = False
+    oom = False
+
+    while True:
+        stop_reason = search.steps(1000)
+
+        if stop_reason == veritas.StopReason.NO_MORE_OPEN:
+            break
+
+        has_timed_out = search.time_since_start() >= timeout
+        oom = stop_reason == veritas.StopReason.OUT_OF_MEMORY
+        if has_timed_out or oom:
+            break
+
+    out_of_resources = has_timed_out or oom
+
+    pos_solutions = []
+    neg_solutions = []
+
+    s = True
+    i = 0
+    while s:
+        try:
+            sol = search.get_solution(i)
+            pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
+            
+        except IndexError:
+            s = False
+        i += 1
+
+    return pos_solutions, neg_solutions, out_of_resources
+
+@njit
+def min_dist_to_solutions(example, all_inds, all_doms, n_intervals):
+    min_dist = 1e18
+    for s in range(n_intervals):
+        max_dist = 0.0
+        inds = all_inds[s]
+        doms = all_doms[s]
+        for i in range(len(inds)):
+            idx = inds[i]
+            if idx == -1:
+                break
+            x = example[idx]
+            low, high = doms[i, 0], doms[i, 1]
+            if x < low:
+                d = low - x
+            elif x > high:
+                d = x - high
+            else:
+                d = 0.0
+            if d > max_dist:
+                max_dist = d
+        if max_dist < min_dist:
+            min_dist = max_dist
+    return min_dist
+
+
+def approx_emp_robustness(at, max_delta, example, target_label):
     if target_label:
         source_at, target_at = None, at
     else:
@@ -40,7 +107,7 @@ def approx_emp_robustness(at, example, target_label, max_delta):
     return delta_lo
 
 
-def exact_emp_robustness(at, example, target_label, max_delta):
+def exact_emp_robustness_bounded(at, max_delta, example, target_label):
     from gurobipy import GRB
 
     # By putting a box around the example, we make the search space smaller.
@@ -60,16 +127,71 @@ def exact_emp_robustness(at, example, target_label, max_delta):
 
     #return linf(example, kan.solution()[0])
 
+def exact_emp_robustness(at, example, target_label):
+    from gurobipy import GRB
 
-def emp_robustness(at, x, y, n, exact, timeout):
+    kan = veritas.KantchelianAttack(at, target_label, example)
+    kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
+    kan.model.setParam(GRB.Param.Threads, 1)
+    kan.optimize()
+    return kan.bounds[-1][0]
+
+def emp_robustness_linear_scan(inds, doms, example, target_label):
+    if target_label:
+        inds = inds['positive']
+        doms = doms['positive']
+    else:
+        inds = inds['negative']
+        doms = doms['negative']
+
+    min_dist = min_dist_to_solutions(example, inds, doms, len(inds))
+
+    return min_dist
+
+def get_inds_doms(pos_solutions, neg_solutions):
+    pos_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in pos_solutions]
+    max_k = max(len(sol[0]) for sol in pos_solutions)
+    n_pos = len(pos_solutions)
+
+    pos_inds = -np.ones((n_pos, max_k), dtype=np.int32)
+    pos_doms = np.zeros((n_pos, max_k, 2), dtype=np.float32)
+
+    for i, sol in enumerate(pos_solutions):
+        k = len(sol[0])
+        pos_inds[i, :k] = sol[0]
+        pos_doms[i, :k] = sol[1]
+
+    neg_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in neg_solutions]
+    max_k = max(len(sol[0]) for sol in neg_solutions)
+    n_neg = len(neg_solutions)
+
+    neg_inds = -np.ones((n_neg, max_k), dtype=np.int32)
+    neg_doms = np.zeros((n_neg, max_k, 2), dtype=np.float32)
+
+    for i, sol in enumerate(neg_solutions):
+        k = len(sol[0])
+        neg_inds[i, :k] = sol[0]
+        neg_doms[i, :k] = sol[1]
+
+    inds = {'positive': pos_inds, 'negative': neg_inds}
+    doms = {'positive': pos_doms, 'negative': neg_doms}
+
+    return inds, doms
+
+def emp_robustness(at, x, y, n, method, timeout):
     delta_lo = 0.0
     count = 0
-
-    if exact:
-        f = exact_emp_robustness
-    else:
-        f = approx_emp_robustness
-
+    result = {}
+    if method == 'exact':
+        f = partial(exact_emp_robustness, at)
+    elif method == 'approx':
+        f = partial(approx_emp_robustness, at, 1.0)
+    elif method == 'linear_scan':
+        pos_solutions, neg_solutions, out_of_resources = find_ocs(at, timeout)
+        inds, doms = get_inds_doms(pos_solutions, neg_solutions)
+        f = partial(emp_robustness_linear_scan, inds, doms)
+        result['oc_space'] = len(pos_solutions) + len(neg_solutions)
+        result['failed_oc'] = out_of_resources
     t = time.time()
     for i in x.index:
         target_label = not (y.loc[i] > 0.0)
@@ -77,7 +199,7 @@ def emp_robustness(at, x, y, n, exact, timeout):
         pred_label = at.eval(example)[0, 0] > 0.0
 
         if pred_label != target_label:
-            res = f(at, example, target_label, max_delta=1.0)
+            res = f(example, target_label)
             delta_lo += res
 
         count += 1
@@ -86,8 +208,10 @@ def emp_robustness(at, x, y, n, exact, timeout):
         if time.time() - t > timeout:
             break
     t = time.time() - t
-
-    return delta_lo / count, count, t
+    result['emp_rob'] = delta_lo / count
+    result['emp_rob_n'] = count
+    result['emp_rob_time'] = t
+    return result
 
 
 def constrast_two_examples(at):
@@ -151,11 +275,14 @@ def run_verification_tasks(at, x, y, timeout, n):
     # nocs, nocs_time, nocs_timeout = count_ocs(at, timeout)
 
     ## VERIFICATION: (2) Empricial robustness (exact + approx)
-    rob_exact, rob_exact_n, rob_exact_time = emp_robustness(
-        at, x, y, n, exact=True, timeout=timeout
+    result_exact_emp_rob = emp_robustness(
+        at, x, y, n, method='exact', timeout=timeout
     )
-    rob_approx, rob_approx_n, rob_approx_time = emp_robustness(
-        at, x, y, n, exact=False, timeout=timeout
+    result_approx_emp_rob = emp_robustness(
+        at, x, y, n, method='approx', timeout=timeout
+    )
+    result_exact_emp_rob_linear_scan = emp_robustness(
+        at, x, y, n, method='linear_scan', timeout=timeout
     )
 
 
@@ -167,14 +294,20 @@ def run_verification_tasks(at, x, y, timeout, n):
         # "nocs": nocs,
         # "nocs_time": nocs_time,
         # "nocs_timeout": nocs_timeout,
-        "exact_emp_rob": rob_exact,
-        "exact_emp_rob_n": rob_exact_n,
-        "exact_emp_rob_timeout": rob_exact_time >= timeout,
-        "exact_emp_rob_time": rob_exact_time,
-        "approx_emp_rob": rob_approx,
-        "approx_emp_rob_n": rob_approx_n,
-        "approx_emp_rob_timeout": rob_approx_time >= timeout,
-        "approx_emp_rob_time": rob_approx_time,
+        "exact_emp_rob": result_exact_emp_rob['emp_rob'],
+        "exact_emp_rob_n": result_exact_emp_rob['emp_rob_n'],
+        "exact_emp_rob_timeout": result_exact_emp_rob['emp_rob_time'] >= timeout,
+        "exact_emp_rob_time": result_exact_emp_rob['emp_rob_time'],
+        "approx_emp_rob": result_approx_emp_rob['emp_rob'],
+        "approx_emp_rob_n": result_approx_emp_rob['emp_rob_n'],
+        "approx_emp_rob_timeout": result_approx_emp_rob['emp_rob_time'] >= timeout,
+        "approx_emp_rob_time": result_approx_emp_rob['emp_rob_time'],
+        "exact_emp_rob_linear_scan": result_exact_emp_rob_linear_scan['emp_rob'],
+        "exact_emp_rob_linear_scan_n": result_exact_emp_rob_linear_scan['emp_rob_n'],
+        "exact_emp_rob_linear_scan_timeout": result_exact_emp_rob_linear_scan['emp_rob_time'] >= timeout,
+        "exact_emp_rob_linear_scan_time": result_exact_emp_rob_linear_scan['emp_rob_time'],
+        "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
+        "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
         # "isfair": isfair,
         # "fair_timeout": fair_timeout,
         # "fair_time": fair_time,
