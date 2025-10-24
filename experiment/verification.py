@@ -1,9 +1,11 @@
 from functools import partial
 import time
 from unittest import result
+from torch import neg
 import veritas
 from numba import njit
 import numpy as np
+import sys
 
 def count_ocs(at, timeout):
     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
@@ -16,7 +18,6 @@ def count_ocs(at, timeout):
 
     while True:
         stop_reason = search.steps(1000)
-
         if stop_reason == veritas.StopReason.NO_MORE_OPEN:
             break
 
@@ -39,7 +40,7 @@ def find_ocs(at, timeout):
 
     while True:
         stop_reason = search.steps(1000)
-
+        # print(search.get_used_memory())
         if stop_reason == veritas.StopReason.NO_MORE_OPEN:
             break
 
@@ -49,22 +50,38 @@ def find_ocs(at, timeout):
             break
 
     out_of_resources = has_timed_out or oom
+    time_taken = search.time_since_start()
+    # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
 
-    pos_solutions = []
-    neg_solutions = []
+    num_solutions = search.num_solutions()
+    num_features = len(at.get_splits())
+
+    inds = -np.ones((num_solutions, num_features), dtype=np.int32)
+    doms = np.zeros((num_solutions, num_features, 2), dtype=np.float32)
+    labels = np.zeros(num_solutions, dtype=np.uint8)
 
     s = True
     i = 0
     while s:
         try:
             sol = search.get_solution(i)
-            pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
-            
         except IndexError:
-            s = False
-        i += 1
+            break
+            # pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
+        labels[i] = 1 if sol.output > 0 else 0
 
-    return pos_solutions, neg_solutions, out_of_resources
+        sol = sol.box()
+
+        k = len(sol.keys())
+        inds[i, :k] = list(sol.keys())
+        doms[i, :k, 0] = [dom.lo for dom in sol.values()]
+        doms[i, :k, 1] = [dom.hi for dom in sol.values()]
+
+        i += 1
+    
+    inds = {'positive': inds[labels == 1], 'negative': inds[labels == 0]}
+    doms = {'positive': doms[labels == 1], 'negative': doms[labels == 0]}
+    return inds, doms, out_of_resources, time_taken
 
 @njit
 def min_dist_to_solutions(example, all_inds, all_doms, n_intervals):
@@ -134,7 +151,11 @@ def exact_emp_robustness(at, example, target_label):
     kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
     kan.model.setParam(GRB.Param.Threads, 1)
     kan.optimize()
-    return kan.bounds[-1][0]
+    # print(kan.bounds)
+    try:
+        return kan.bounds[-1][0]
+    except IndexError:
+        return 1e18
 
 def emp_robustness_linear_scan(inds, doms, example, target_label):
     if target_label:
@@ -148,35 +169,35 @@ def emp_robustness_linear_scan(inds, doms, example, target_label):
 
     return min_dist
 
-def get_inds_doms(pos_solutions, neg_solutions):
-    pos_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in pos_solutions]
-    max_k = max(len(sol[0]) for sol in pos_solutions)
-    n_pos = len(pos_solutions)
+# def get_inds_doms(pos_solutions, neg_solutions):
+#     pos_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in pos_solutions]
+#     max_k = max(len(sol[0]) for sol in pos_solutions)
+#     n_pos = len(pos_solutions)
 
-    pos_inds = -np.ones((n_pos, max_k), dtype=np.int32)
-    pos_doms = np.zeros((n_pos, max_k, 2), dtype=np.float32)
+#     pos_inds = -np.ones((n_pos, max_k), dtype=np.int32)
+#     pos_doms = np.zeros((n_pos, max_k, 2), dtype=np.float32)
 
-    for i, sol in enumerate(pos_solutions):
-        k = len(sol[0])
-        pos_inds[i, :k] = sol[0]
-        pos_doms[i, :k] = sol[1]
+#     for i, sol in enumerate(pos_solutions):
+#         k = len(sol[0])
+#         pos_inds[i, :k] = sol[0]
+#         pos_doms[i, :k] = sol[1]
 
-    neg_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in neg_solutions]
-    max_k = max(len(sol[0]) for sol in neg_solutions)
-    n_neg = len(neg_solutions)
+#     neg_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in neg_solutions]
+#     max_k = max(len(sol[0]) for sol in neg_solutions)
+#     n_neg = len(neg_solutions)
 
-    neg_inds = -np.ones((n_neg, max_k), dtype=np.int32)
-    neg_doms = np.zeros((n_neg, max_k, 2), dtype=np.float32)
+#     neg_inds = -np.ones((n_neg, max_k), dtype=np.int32)
+#     neg_doms = np.zeros((n_neg, max_k, 2), dtype=np.float32)
 
-    for i, sol in enumerate(neg_solutions):
-        k = len(sol[0])
-        neg_inds[i, :k] = sol[0]
-        neg_doms[i, :k] = sol[1]
+#     for i, sol in enumerate(neg_solutions):
+#         k = len(sol[0])
+#         neg_inds[i, :k] = sol[0]
+#         neg_doms[i, :k] = sol[1]
 
-    inds = {'positive': pos_inds, 'negative': neg_inds}
-    doms = {'positive': pos_doms, 'negative': neg_doms}
+#     inds = {'positive': pos_inds, 'negative': neg_inds}
+#     doms = {'positive': pos_doms, 'negative': neg_doms}
 
-    return inds, doms
+#     return inds, doms
 
 def emp_robustness(at, x, y, n, method, timeout):
     delta_lo = 0.0
@@ -187,11 +208,20 @@ def emp_robustness(at, x, y, n, method, timeout):
     elif method == 'approx':
         f = partial(approx_emp_robustness, at, 1.0)
     elif method == 'linear_scan':
-        pos_solutions, neg_solutions, out_of_resources = find_ocs(at, timeout)
-        inds, doms = get_inds_doms(pos_solutions, neg_solutions)
+        inds, doms, out_of_resources, time_taken = find_ocs(at, timeout)
+        # print(sys.getsizeof(inds), sys.getsizeof(doms))
+        # print(inds['positive'].shape)
+        # print(inds['positive'].size*inds['positive'].itemsize)
+        # print(doms['positive'].size*doms['positive'].itemsize)
+        # print(sys.getsizeof(pos_solutions) + sys.getsizeof(neg_solutions))
+        # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
+        # inds, doms = get_inds_doms(pos_solutions, neg_solutions)
+        # print(sys.getsizeof(inds) + sys.getsizeof(doms))
+        # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
         f = partial(emp_robustness_linear_scan, inds, doms)
-        result['oc_space'] = len(pos_solutions) + len(neg_solutions)
+        result['oc_space'] = len(inds['positive']) + len(inds['negative'])
         result['failed_oc'] = out_of_resources
+        result['time_taken_oc'] = time_taken
     t = time.time()
     for i in x.index:
         target_label = not (y.loc[i] > 0.0)
@@ -274,7 +304,7 @@ def run_verification_tasks(at, x, y, timeout, n):
     ## VERIFICATION: (1) HOW MANY OCs?
     # nocs, nocs_time, nocs_timeout = count_ocs(at, timeout)
 
-    ## VERIFICATION: (2) Empricial robustness (exact + approx)
+    # VERIFICATION: (2) Empricial robustness (exact + approx)
     result_exact_emp_rob = emp_robustness(
         at, x, y, n, method='exact', timeout=timeout
     )
