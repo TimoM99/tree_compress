@@ -10,7 +10,7 @@ import sys
 def count_ocs(at, timeout):
     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
     config.stop_when_optimal = False
-    config.max_memory = 16*1024*1024*1024
+    config.max_memory = 32*1024*1024*1024
     search = config.get_search(at)
 
     has_timed_out = False
@@ -29,10 +29,10 @@ def count_ocs(at, timeout):
     out_of_resources = has_timed_out or oom
     return search.num_solutions(), search.time_since_start(), out_of_resources
 
-def find_ocs(at, timeout):
+def find_ocs(at, timeout, memory_limit):
     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
     config.stop_when_optimal = False
-    config.max_memory = 16*1024*1024*1024
+    config.max_memory = memory_limit
     search = config.get_search(at)
 
     has_timed_out = False
@@ -51,6 +51,7 @@ def find_ocs(at, timeout):
 
     out_of_resources = has_timed_out or oom
     time_taken = search.time_since_start()
+    memory_used = search.get_used_memory()
     # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
 
     num_solutions = search.num_solutions()
@@ -81,7 +82,7 @@ def find_ocs(at, timeout):
     
     inds = {'positive': inds[labels == 1], 'negative': inds[labels == 0]}
     doms = {'positive': doms[labels == 1], 'negative': doms[labels == 0]}
-    return inds, doms, out_of_resources, time_taken
+    return inds, doms, out_of_resources, time_taken, memory_used
 
 @njit
 def min_dist_to_solutions(example, all_inds, all_doms, n_intervals):
@@ -199,7 +200,7 @@ def emp_robustness_linear_scan(inds, doms, example, target_label):
 
 #     return inds, doms
 
-def emp_robustness(at, x, y, n, method, timeout):
+def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024):
     delta_lo = 0.0
     count = 0
     result = {}
@@ -208,7 +209,7 @@ def emp_robustness(at, x, y, n, method, timeout):
     elif method == 'approx':
         f = partial(approx_emp_robustness, at, 1.0)
     elif method == 'linear_scan':
-        inds, doms, out_of_resources, time_taken = find_ocs(at, timeout)
+        inds, doms, out_of_resources, time_taken, memory_used = find_ocs(at, timeout, memory_limit)
         # print(sys.getsizeof(inds), sys.getsizeof(doms))
         # print(inds['positive'].shape)
         # print(inds['positive'].size*inds['positive'].itemsize)
@@ -222,6 +223,9 @@ def emp_robustness(at, x, y, n, method, timeout):
         result['oc_space'] = len(inds['positive']) + len(inds['negative'])
         result['failed_oc'] = out_of_resources
         result['time_taken_oc'] = time_taken
+        result['memory_used_oc'] = memory_used
+        result['doms'] = doms
+        result['inds'] = inds
     t = time.time()
     for i in x.index:
         target_label = not (y.loc[i] > 0.0)
@@ -299,7 +303,7 @@ def fairness_task(at, timeout):
 
     return isfair, has_timed_out or oom, t
 
-def run_verification_tasks(at, x, y, timeout, n):
+def run_verification_tasks(at, x, y, timeout, memory_limit, n):
 
     ## VERIFICATION: (1) HOW MANY OCs?
     # nocs, nocs_time, nocs_timeout = count_ocs(at, timeout)
@@ -312,7 +316,7 @@ def run_verification_tasks(at, x, y, timeout, n):
         at, x, y, n, method='approx', timeout=timeout
     )
     result_exact_emp_rob_linear_scan = emp_robustness(
-        at, x, y, n, method='linear_scan', timeout=timeout
+        at, x, y, n, method='linear_scan', timeout=timeout, memory_limit=memory_limit
     )
 
 
@@ -338,7 +342,9 @@ def run_verification_tasks(at, x, y, timeout, n):
         "exact_emp_rob_linear_scan_time": result_exact_emp_rob_linear_scan['emp_rob_time'],
         "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
         "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
+        "time_taken_oc": result_exact_emp_rob_linear_scan['time_taken_oc'],
+        "memory_used_oc": result_exact_emp_rob_linear_scan['memory_used_oc'],
         # "isfair": isfair,
         # "fair_timeout": fair_timeout,
         # "fair_time": fair_time,
-    }
+    }, result_exact_emp_rob_linear_scan['doms'], result_exact_emp_rob_linear_scan['inds']
