@@ -52,36 +52,57 @@ def find_ocs(at, timeout, memory_limit):
     out_of_resources = has_timed_out or oom
     time_taken = search.time_since_start()
     memory_used = search.get_used_memory()
-    # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
-
-    num_solutions = search.num_solutions()
-    num_features = len(at.get_splits())
-
-    inds = -np.ones((num_solutions, num_features), dtype=np.int32)
-    doms = np.zeros((num_solutions, num_features, 2), dtype=np.float32)
-    labels = np.zeros(num_solutions, dtype=np.uint8)
 
     s = True
     i = 0
+    pos_count = 0
+    max_box_size = 0
     while s:
         try:
             sol = search.get_solution(i)
         except IndexError:
             break
+        
+        pos_count += 1 if sol.output > 0 else 0
+        max_box_size = max(max_box_size, len(sol.box().keys()))
+        i += 1
+
+    num_solutions = search.num_solutions()
+    # num_features = len(at.get_splits())
+
+    pos_inds = -np.ones((pos_count, max_box_size), dtype=np.int32)
+    neg_inds = -np.ones((num_solutions - pos_count, max_box_size), dtype=np.int32)
+    pos_doms = np.zeros((pos_count, max_box_size, 2), dtype=np.float32)
+    neg_doms = np.zeros((num_solutions - pos_count, max_box_size, 2), dtype=np.float32)
+
+    p = 0
+    n = 0
+    while s:
+        try:
+            sol = search.get_solution(p+n)
+        except IndexError:
+            break
             # pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
-        labels[i] = 1 if sol.output > 0 else 0
+        label = 1 if sol.output > 0 else 0
 
         sol = sol.box()
-
         k = len(sol.keys())
-        inds[i, :k] = list(sol.keys())
-        doms[i, :k, 0] = [dom.lo for dom in sol.values()]
-        doms[i, :k, 1] = [dom.hi for dom in sol.values()]
 
-        i += 1
-    
-    inds = {'positive': inds[labels == 1], 'negative': inds[labels == 0]}
-    doms = {'positive': doms[labels == 1], 'negative': doms[labels == 0]}
+        if label == 1:
+            pos_inds[p, :k] = list(sol.keys())
+            pos_doms[p, :k, 0] = [dom.lo for dom in sol.values()]
+            pos_doms[p, :k, 1] = [dom.hi for dom in sol.values()]
+            p += 1
+
+        else:
+            neg_inds[n, :k] = list(sol.keys())
+            neg_doms[n, :k, 0] = [dom.lo for dom in sol.values()]
+            neg_doms[n, :k, 1] = [dom.hi for dom in sol.values()]
+            n += 1
+        
+
+    inds = {'positive': pos_inds, 'negative': neg_inds}
+    doms = {'positive': pos_doms, 'negative': neg_doms}
     return inds, doms, out_of_resources, time_taken, memory_used
 
 @njit
