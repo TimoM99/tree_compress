@@ -2,6 +2,7 @@ import os
 import joblib
 import json
 import colorama
+os.environ['PRADA_DATA_DIR']='/cw/dtaijupiter/NoCsBack/dtai/timo/prada_data'
 import prada
 import veritas
 import numpy as np
