@@ -6,6 +6,7 @@ experiment/tex
 experiment/results/old_results
 experiment/results/logs
 experiment/processed_results
+experiment/settings
 experiment/figures
 experiment/__pycache__
 experiment/results
@@ -17,3 +18,4 @@ build/
 *.pdf
 .flake8
 ruff.toml
+
