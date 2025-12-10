@@ -7,6 +7,67 @@ from numba import njit
 import numpy as np
 import sys
 
+import resource
+from multiprocessing import Process, Pipe
+import traceback
+
+
+# ------------------------------
+# Worker-side memory limit
+# ------------------------------
+def set_memory_limit_mb(megabytes: int):
+    limit = megabytes * 1024 * 1024
+    # limit virtual memory (address space)
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
+# ------------------------------
+# Universal runner for any function
+# ------------------------------
+def _worker(conn, func, args, kwargs, mem_limit_mb):
+    try:
+        if mem_limit_mb is not None:
+            set_memory_limit_mb(mem_limit_mb)
+
+        result = func(*args, **kwargs)
+        conn.send(("ok", result))
+
+    except MemoryError as e:
+        conn.send(("error", "MemoryError: " + str(e)))
+
+    except Exception as e:
+        # Include traceback for debugging
+        tb = traceback.format_exc()
+        conn.send(("error", f"{e}\n{tb}"))
+
+
+# ------------------------------
+# Public API
+# ------------------------------
+def run_with_timeout_and_memory(func, *args, timeout=None, mem_limit_mb=None, **kwargs):
+    parent, child = Pipe()
+    p = Process(target=_worker, args=(child, func, args, kwargs, mem_limit_mb))
+    p.start()
+
+    start_time = time.time()
+    while True:
+        if parent.poll(0.1):  # check every 0.1 sec if worker sent data
+            status, payload = parent.recv()
+            p.join()
+            if status == "ok":
+                return payload
+            if "MemoryError" in payload:
+                raise MemoryError(payload)
+            raise RuntimeError("Worker error:\n" + payload)
+        
+        if timeout is not None and (time.time() - start_time) > timeout:
+            p.kill()
+            p.join()
+            raise TimeoutError(f"Function did not finish within {timeout} seconds")
+
+
+
+
 def count_ocs(at, timeout):
     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
     config.stop_when_optimal = False
@@ -29,81 +90,240 @@ def count_ocs(at, timeout):
     out_of_resources = has_timed_out or oom
     return search.num_solutions(), search.time_since_start(), out_of_resources
 
-def find_ocs(at, timeout, memory_limit):
-    config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
-    config.stop_when_optimal = False
-    config.max_memory = memory_limit
-    search = config.get_search(at)
+# def find_ocs(at, timeout, memory_limit):
+#     config = veritas.Config(veritas.HeuristicType.MAX_OUTPUT)
+#     config.stop_when_optimal = False
+#     config.max_memory = memory_limit
+#     search = config.get_search(at)
 
-    has_timed_out = False
-    oom = False
+#     has_timed_out = False
+#     oom = False
 
-    while True:
-        stop_reason = search.steps(1000)
-        # print(search.get_used_memory())
-        if stop_reason == veritas.StopReason.NO_MORE_OPEN:
-            break
+#     while True:
+#         stop_reason = search.steps(1000)
+#         # print(search.get_used_memory())
+#         if stop_reason == veritas.StopReason.NO_MORE_OPEN:
+#             break
 
-        has_timed_out = search.time_since_start() >= timeout
-        oom = stop_reason == veritas.StopReason.OUT_OF_MEMORY
-        if has_timed_out or oom:
-            break
+#         has_timed_out = search.time_since_start() >= timeout
+#         oom = stop_reason == veritas.StopReason.OUT_OF_MEMORY
+#         if has_timed_out or oom:
+#             break
 
-    out_of_resources = has_timed_out or oom
-    time_taken = search.time_since_start()
-    memory_used = search.get_used_memory()
+#     out_of_resources = has_timed_out or oom
+#     time_taken = search.time_since_start()
+#     memory_used = search.get_used_memory()
 
-    s = True
-    i = 0
-    pos_count = 0
-    max_box_size = 0
-    while s:
-        try:
-            sol = search.get_solution(i)
-        except IndexError:
-            break
+#     s = True
+#     i = 0
+#     pos_count = 0
+#     max_box_size = 0
+#     while s:
+#         try:
+#             sol = search.get_solution(i)
+#         except IndexError:
+#             break
         
-        pos_count += 1 if sol.output > 0 else 0
-        max_box_size = max(max_box_size, len(sol.box().keys()))
-        i += 1
+#         pos_count += 1 if sol.output > 0 else 0
+#         max_box_size = max(max_box_size, len(sol.box().keys()))
+#         i += 1
 
-    num_solutions = search.num_solutions()
-    # num_features = len(at.get_splits())
+#     num_solutions = search.num_solutions()
+#     # num_features = len(at.get_splits())
 
-    pos_inds = -np.ones((pos_count, max_box_size), dtype=np.int32)
-    neg_inds = -np.ones((num_solutions - pos_count, max_box_size), dtype=np.int32)
-    pos_doms = np.zeros((pos_count, max_box_size, 2), dtype=np.float32)
-    neg_doms = np.zeros((num_solutions - pos_count, max_box_size, 2), dtype=np.float32)
+#     pos_inds = -np.ones((pos_count, max_box_size), dtype=np.int32)
+#     neg_inds = -np.ones((num_solutions - pos_count, max_box_size), dtype=np.int32)
+#     pos_doms = np.zeros((pos_count, max_box_size, 2), dtype=np.float32)
+#     neg_doms = np.zeros((num_solutions - pos_count, max_box_size, 2), dtype=np.float32)
 
-    p = 0
-    n = 0
-    while s:
-        try:
-            sol = search.get_solution(p+n)
-        except IndexError:
-            break
-            # pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
-        label = 1 if sol.output > 0 else 0
+#     p = 0
+#     n = 0
+#     while s:
+#         try:
+#             sol = search.get_solution(p+n)
+#         except IndexError:
+#             break
+#             # pos_solutions.append(sol.box()) if sol.output > 0 else neg_solutions.append(sol.box())
+#         label = 1 if sol.output > 0 else 0
 
-        sol = sol.box()
-        k = len(sol.keys())
+#         sol = sol.box()
+#         k = len(sol.keys())
 
-        if label == 1:
-            pos_inds[p, :k] = list(sol.keys())
-            pos_doms[p, :k, 0] = [dom.lo for dom in sol.values()]
-            pos_doms[p, :k, 1] = [dom.hi for dom in sol.values()]
-            p += 1
+#         if label == 1:
+#             pos_inds[p, :k] = list(sol.keys())
+#             pos_doms[p, :k, 0] = [dom.lo for dom in sol.values()]
+#             pos_doms[p, :k, 1] = [dom.hi for dom in sol.values()]
+#             p += 1
+
+#         else:
+#             neg_inds[n, :k] = list(sol.keys())
+#             neg_doms[n, :k, 0] = [dom.lo for dom in sol.values()]
+#             neg_doms[n, :k, 1] = [dom.hi for dom in sol.values()]
+#             n += 1
+        
+
+#     inds = {'positive': pos_inds, 'negative': neg_inds}
+#     doms = {'positive': pos_doms, 'negative': neg_doms}
+#     return inds, doms, out_of_resources, time_taken, memory_used
+
+def find_ocs(at, timeout, memory_limit_mb):
+    start_time = time.time()
+    out_of_resources = False
+
+    doms = {'positive': None, 'negative': None}
+    inds = {'positive': None, 'negative': None}
+    try:
+        inds, doms = run_with_timeout_and_memory(
+            enumerate_ocs, at, timeout=timeout, mem_limit_mb=memory_limit_mb
+        )
+    except (TimeoutError, MemoryError):
+        out_of_resources = True
+    
+    time_taken = time.time() - start_time
+
+    return inds, doms, out_of_resources, time_taken
+
+def enumerate_ocs(at):
+    doms = None
+    inds = None
+    preds = None
+
+    for t in at:
+        leaf_ids = t.get_leaf_ids()
+
+        leaf_boxes = [t.compute_box(lid) for lid in leaf_ids]
+        leaf_preds = np.array([t.get_leaf_value(lid, 0) for lid in leaf_ids], dtype=np.float32)
+        
+        leaf_doms = np.zeros((len(leaf_boxes), max(len(box) for box in leaf_boxes), 2), dtype=np.float32)
+        leaf_inds = -np.ones((len(leaf_boxes), max(len(box) for box in leaf_boxes)), dtype=np.int32)
+        for k, box in enumerate(leaf_boxes):
+            leaf_doms[k, :len(box.keys())] = [[dom.lo, dom.hi] for dom in box.values()]
+            leaf_inds[k, :len(box.keys())] = list(box.keys())
+
+        if doms is None:
+            doms = leaf_doms
+            inds = leaf_inds
+            preds = leaf_preds + at.get_base_score(0)
 
         else:
-            neg_inds[n, :k] = list(sol.keys())
-            neg_doms[n, :k, 0] = [dom.lo for dom in sol.values()]
-            neg_doms[n, :k, 1] = [dom.hi for dom in sol.values()]
-            n += 1
-        
+            doms, inds, preds = cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds)
 
-    inds = {'positive': pos_inds, 'negative': neg_inds}
-    doms = {'positive': pos_doms, 'negative': neg_doms}
-    return inds, doms, out_of_resources, time_taken, memory_used
+    # preds = np.exp(preds)/(1+np.exp(preds))
+    labels = preds > 0.0
+
+    inds = {'positive': inds[labels], 'negative': inds[~labels]}
+    doms = {'positive': doms[labels], 'negative': doms[~labels]}
+    
+    return inds, doms
+
+
+@njit
+def cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds):
+    count = 0
+    for i in range(doms.shape[0]):
+        for j in range(leaf_doms.shape[0]):
+            dom = doms[i]
+            ind = inds[i]
+            leaf_dom = leaf_doms[j]
+            leaf_ind = leaf_inds[j]
+            if is_compatible(dom, ind, leaf_dom, leaf_ind):
+                count += 1
+    
+    doms_result = np.zeros((count, doms.shape[1] + leaf_doms.shape[1], 2), dtype=np.float32)
+    inds_result = -np.ones((count, inds.shape[1] + leaf_inds.shape[1]), dtype=np.int32)
+    preds_result = np.zeros((count,), dtype=np.float32)
+
+    k = 0
+    max_box_size = 0
+    for i in range(doms.shape[0]):
+        for j in range(leaf_doms.shape[0]):
+            dom = doms[i]
+            ind = inds[i]
+            pred = preds[i]
+            leaf_dom = leaf_doms[j]
+            leaf_ind = leaf_inds[j]
+            leaf_pred = leaf_preds[j]
+            if is_compatible(dom, ind, leaf_dom, leaf_ind):
+                # Merge dom and leaf_dom
+                # print(dom, ind, leaf_dom, leaf_ind)
+                box_size = merge_doms(dom, ind, leaf_dom, leaf_ind, doms_result[k], inds_result[k])
+                preds_result[k] = pred + leaf_pred
+                # print('Merged box: ', doms_result[k][:box_size], inds_result[k][:box_size])
+                max_box_size = max(max_box_size, box_size)
+                k += 1
+
+    doms_result = doms_result[:, :max_box_size, :]
+    inds_result = inds_result[:, :max_box_size]
+    return doms_result, inds_result, preds_result
+
+@njit
+def is_compatible(dom, ind, leaf_dom, leaf_ind):
+    i = 0
+    j = 0
+    while i < len(leaf_ind) and j < len(ind):
+        l_idx = leaf_ind[i]
+        idx = ind[j]
+        if l_idx == -1 or idx == -1:
+            break
+        if l_idx < idx:
+            i += 1
+        elif l_idx > idx:
+            j += 1
+        else:
+            low, high = leaf_dom[i, 0], leaf_dom[i, 1]
+            d_low, d_high = dom[j, 0], dom[j, 1]
+            if min(high, d_high) <= max(low, d_low):
+                return False
+            i += 1
+            j += 1
+    return True
+
+@njit
+def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
+    i = 0
+    j = 0
+    l = 0
+    while i < len(leaf_ind) and j < len(ind):
+        # print(i, j)
+        l_idx = leaf_ind[i]
+        idx = ind[j]
+        if l_idx == -1 and idx == -1:
+            break
+        if (l_idx < idx and l_idx != -1) or idx == -1:
+            dom_result[l] = [leaf_dom[i, 0], leaf_dom[i, 1]]
+            ind_result[l] = l_idx
+            l += 1
+            i += 1
+
+        elif (l_idx > idx and idx != -1) or l_idx == -1:
+            dom_result[l] = [dom[j, 0], dom[j, 1]]
+            ind_result[l] = idx
+            l += 1
+            j += 1
+        
+        else:
+            low, high = leaf_dom[i, 0], leaf_dom[i, 1]
+            d_low, d_high = dom[j, 0], dom[j, 1]
+            dom_result[l] = [max(low, d_low), min(high, d_high)]
+            ind_result[l] = idx
+            i += 1
+            j += 1
+            l += 1
+    
+    if i < len(leaf_ind) and leaf_ind[i] != -1:
+        dom_result[l:l + (len(leaf_ind) - i), 0] = leaf_dom[i:len(leaf_ind), 0]
+        dom_result[l:l + (len(leaf_ind) - i), 1] = leaf_dom[i:len(leaf_ind), 1]
+        ind_result[l:l + (len(leaf_ind) - i)] = leaf_ind[i:len(leaf_ind)]
+        l += len(leaf_ind) - i
+    
+    if j < len(ind) and ind[j] != -1:
+        dom_result[l:l + (len(ind) - j), 0] = dom[j:len(ind), 0]
+        dom_result[l:l + (len(ind) - j), 1] = dom[j:len(ind), 1]
+        ind_result[l:l + (len(ind) - j)] = ind[j:len(ind)]
+        l += len(ind) - j
+
+    return l
+
 
 @njit
 def min_dist_to_solutions(example, all_inds, all_doms, n_intervals):
@@ -230,7 +450,7 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
     elif method == 'approx':
         f = partial(approx_emp_robustness, at, 1.0)
     elif method == 'linear_scan':
-        inds, doms, out_of_resources, time_taken, memory_used = find_ocs(at, timeout, memory_limit)
+        inds, doms, out_of_resources, time_taken = find_ocs(at, timeout, memory_limit)
         # print(sys.getsizeof(inds), sys.getsizeof(doms))
         # print(inds['positive'].shape)
         # print(inds['positive'].size*inds['positive'].itemsize)
@@ -244,7 +464,7 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
         result['oc_space'] = len(inds['positive']) + len(inds['negative'])
         result['failed_oc'] = out_of_resources
         result['time_taken_oc'] = time_taken
-        result['memory_used_oc'] = memory_used
+        # result['memory_used_oc'] = memory_used
         result['doms'] = doms
         result['inds'] = inds
     t = time.time()
@@ -364,7 +584,7 @@ def run_verification_tasks(at, x, y, timeout, memory_limit, n):
         "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
         "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
         "time_taken_oc": result_exact_emp_rob_linear_scan['time_taken_oc'],
-        "memory_used_oc": result_exact_emp_rob_linear_scan['memory_used_oc'],
+        # "memory_used_oc": result_exact_emp_rob_linear_scan['memory_used_oc'],
         # "isfair": isfair,
         # "fair_timeout": fair_timeout,
         # "fair_time": fair_time,
