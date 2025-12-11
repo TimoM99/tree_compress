@@ -15,8 +15,8 @@ import traceback
 # ------------------------------
 # Worker-side memory limit
 # ------------------------------
-def set_memory_limit_mb(megabytes: int):
-    limit = megabytes * 1024 * 1024
+def set_memory_limit(byte: int):
+    limit = byte
     # limit virtual memory (address space)
     resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
@@ -24,10 +24,10 @@ def set_memory_limit_mb(megabytes: int):
 # ------------------------------
 # Universal runner for any function
 # ------------------------------
-def _worker(conn, func, args, kwargs, mem_limit_mb):
+def _worker(conn, func, args, kwargs, mem_limit):
     try:
-        if mem_limit_mb is not None:
-            set_memory_limit_mb(mem_limit_mb)
+        if mem_limit is not None:
+            set_memory_limit(mem_limit)
 
         result = func(*args, **kwargs)
         conn.send(("ok", result))
@@ -44,9 +44,9 @@ def _worker(conn, func, args, kwargs, mem_limit_mb):
 # ------------------------------
 # Public API
 # ------------------------------
-def run_with_timeout_and_memory(func, *args, timeout=None, mem_limit_mb=None, **kwargs):
+def run_with_timeout_and_memory(func, *args, timeout=None, mem_limit=None, **kwargs):
     parent, child = Pipe()
-    p = Process(target=_worker, args=(child, func, args, kwargs, mem_limit_mb))
+    p = Process(target=_worker, args=(child, func, args, kwargs, mem_limit))
     p.start()
 
     start_time = time.time()
@@ -166,22 +166,25 @@ def count_ocs(at, timeout):
 #     doms = {'positive': pos_doms, 'negative': neg_doms}
 #     return inds, doms, out_of_resources, time_taken, memory_used
 
-def find_ocs(at, timeout, memory_limit_mb):
+def find_ocs(at, timeout, memory_limit):
     start_time = time.time()
     out_of_resources = False
+    memory_limit_reached = False
 
-    doms = {'positive': None, 'negative': None}
-    inds = {'positive': None, 'negative': None}
+    doms = {'positive': np.full((0,0,2), 0), 'negative': np.full((0,0,2), 0)}
+    inds = {'positive': np.full((0,0), 0), 'negative': np.full((0,0), 0)}
     try:
         inds, doms = run_with_timeout_and_memory(
-            enumerate_ocs, at, timeout=timeout, mem_limit_mb=memory_limit_mb
+            enumerate_ocs, at, timeout=timeout, mem_limit=memory_limit
         )
-    except (TimeoutError, MemoryError):
+    except (TimeoutError, MemoryError) as e:
         out_of_resources = True
+        memory_limit_reached = isinstance(e, MemoryError)
+
     
     time_taken = time.time() - start_time
 
-    return inds, doms, out_of_resources, time_taken
+    return inds, doms, out_of_resources, time_taken, memory_limit_reached
 
 def enumerate_ocs(at):
     doms = None
@@ -208,7 +211,6 @@ def enumerate_ocs(at):
         else:
             doms, inds, preds = cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds)
 
-    # preds = np.exp(preds)/(1+np.exp(preds))
     labels = preds > 0.0
 
     inds = {'positive': inds[labels], 'negative': inds[~labels]}
@@ -220,21 +222,22 @@ def enumerate_ocs(at):
 @njit
 def cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds):
     count = 0
+    max_size = 0
     for i in range(doms.shape[0]):
         for j in range(leaf_doms.shape[0]):
             dom = doms[i]
             ind = inds[i]
             leaf_dom = leaf_doms[j]
             leaf_ind = leaf_inds[j]
-            if is_compatible(dom, ind, leaf_dom, leaf_ind):
+            compatible, size = is_compatible(dom, ind, leaf_dom, leaf_ind)
+            if compatible:
                 count += 1
-    
-    doms_result = np.zeros((count, doms.shape[1] + leaf_doms.shape[1], 2), dtype=np.float32)
-    inds_result = -np.ones((count, inds.shape[1] + leaf_inds.shape[1]), dtype=np.int32)
+                max_size = max(max_size, size) #Keep track of the maximum number of OC features used.
+    doms_result = np.zeros((count, max_size, 2), dtype=np.float32)
+    inds_result = -np.ones((count, max_size), dtype=np.int32)
     preds_result = np.zeros((count,), dtype=np.float32)
-
+    
     k = 0
-    max_box_size = 0
     for i in range(doms.shape[0]):
         for j in range(leaf_doms.shape[0]):
             dom = doms[i]
@@ -243,23 +246,20 @@ def cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds):
             leaf_dom = leaf_doms[j]
             leaf_ind = leaf_inds[j]
             leaf_pred = leaf_preds[j]
-            if is_compatible(dom, ind, leaf_dom, leaf_ind):
+            compatible, _ = is_compatible(dom, ind, leaf_dom, leaf_ind)
+            if compatible:
                 # Merge dom and leaf_dom
-                # print(dom, ind, leaf_dom, leaf_ind)
-                box_size = merge_doms(dom, ind, leaf_dom, leaf_ind, doms_result[k], inds_result[k])
+                merge_doms(dom, ind, leaf_dom, leaf_ind, doms_result[k], inds_result[k])
                 preds_result[k] = pred + leaf_pred
-                # print('Merged box: ', doms_result[k][:box_size], inds_result[k][:box_size])
-                max_box_size = max(max_box_size, box_size)
                 k += 1
-
-    doms_result = doms_result[:, :max_box_size, :]
-    inds_result = inds_result[:, :max_box_size]
+    
     return doms_result, inds_result, preds_result
 
 @njit
 def is_compatible(dom, ind, leaf_dom, leaf_ind):
     i = 0
     j = 0
+    box_size = np.count_nonzero(ind != -1) + np.count_nonzero(leaf_ind != -1)
     while i < len(leaf_ind) and j < len(ind):
         l_idx = leaf_ind[i]
         idx = ind[j]
@@ -273,10 +273,11 @@ def is_compatible(dom, ind, leaf_dom, leaf_ind):
             low, high = leaf_dom[i, 0], leaf_dom[i, 1]
             d_low, d_high = dom[j, 0], dom[j, 1]
             if min(high, d_high) <= max(low, d_low):
-                return False
+                return False, None
+            box_size -= 1
             i += 1
             j += 1
-    return True
+    return True, box_size
 
 @njit
 def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
@@ -284,7 +285,6 @@ def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
     j = 0
     l = 0
     while i < len(leaf_ind) and j < len(ind):
-        # print(i, j)
         l_idx = leaf_ind[i]
         idx = ind[j]
         if l_idx == -1 and idx == -1:
@@ -311,18 +311,19 @@ def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
             l += 1
     
     if i < len(leaf_ind) and leaf_ind[i] != -1:
-        dom_result[l:l + (len(leaf_ind) - i), 0] = leaf_dom[i:len(leaf_ind), 0]
-        dom_result[l:l + (len(leaf_ind) - i), 1] = leaf_dom[i:len(leaf_ind), 1]
-        ind_result[l:l + (len(leaf_ind) - i)] = leaf_ind[i:len(leaf_ind)]
-        l += len(leaf_ind) - i
-    
-    if j < len(ind) and ind[j] != -1:
-        dom_result[l:l + (len(ind) - j), 0] = dom[j:len(ind), 0]
-        dom_result[l:l + (len(ind) - j), 1] = dom[j:len(ind), 1]
-        ind_result[l:l + (len(ind) - j)] = ind[j:len(ind)]
-        l += len(ind) - j
+        nb_filled_leaf_ind = np.count_nonzero(leaf_ind != -1)
 
-    return l
+        dom_result[l:l + (nb_filled_leaf_ind - i), 0] = leaf_dom[i:nb_filled_leaf_ind, 0]
+        dom_result[l:l + (nb_filled_leaf_ind - i), 1] = leaf_dom[i:nb_filled_leaf_ind, 1]
+        ind_result[l:l + (nb_filled_leaf_ind - i)] = leaf_ind[i:nb_filled_leaf_ind]
+
+    if j < len(ind) and ind[j] != -1:
+        nb_filled_ind = np.count_nonzero(ind != -1)
+
+        dom_result[l:l + (nb_filled_ind - j), 0] = dom[j:nb_filled_ind, 0]
+        dom_result[l:l + (nb_filled_ind - j), 1] = dom[j:nb_filled_ind, 1]
+        ind_result[l:l + (nb_filled_ind - j)] = ind[j:nb_filled_ind]
+
 
 
 @njit
@@ -450,7 +451,7 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
     elif method == 'approx':
         f = partial(approx_emp_robustness, at, 1.0)
     elif method == 'linear_scan':
-        inds, doms, out_of_resources, time_taken = find_ocs(at, timeout, memory_limit)
+        inds, doms, out_of_resources, time_taken, memory_limit_reached = find_ocs(at, timeout, memory_limit)
         # print(sys.getsizeof(inds), sys.getsizeof(doms))
         # print(inds['positive'].shape)
         # print(inds['positive'].size*inds['positive'].itemsize)
@@ -464,7 +465,7 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
         result['oc_space'] = len(inds['positive']) + len(inds['negative'])
         result['failed_oc'] = out_of_resources
         result['time_taken_oc'] = time_taken
-        # result['memory_used_oc'] = memory_used
+        result['memory_limit_reached'] = memory_limit_reached
         result['doms'] = doms
         result['inds'] = inds
     t = time.time()
@@ -550,14 +551,14 @@ def run_verification_tasks(at, x, y, timeout, memory_limit, n):
     # nocs, nocs_time, nocs_timeout = count_ocs(at, timeout)
 
     # VERIFICATION: (2) Empricial robustness (exact + approx)
+    result_exact_emp_rob_linear_scan = emp_robustness(
+        at, x, y, n, method='linear_scan', timeout=timeout, memory_limit=memory_limit
+    )
     result_exact_emp_rob = emp_robustness(
         at, x, y, n, method='exact', timeout=timeout
     )
     result_approx_emp_rob = emp_robustness(
         at, x, y, n, method='approx', timeout=timeout
-    )
-    result_exact_emp_rob_linear_scan = emp_robustness(
-        at, x, y, n, method='linear_scan', timeout=timeout, memory_limit=memory_limit
     )
 
 
@@ -584,6 +585,7 @@ def run_verification_tasks(at, x, y, timeout, memory_limit, n):
         "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
         "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
         "time_taken_oc": result_exact_emp_rob_linear_scan['time_taken_oc'],
+        "memory_limit_reached": result_exact_emp_rob_linear_scan['memory_limit_reached'],
         # "memory_used_oc": result_exact_emp_rob_linear_scan['memory_used_oc'],
         # "isfair": isfair,
         # "fair_timeout": fair_timeout,
