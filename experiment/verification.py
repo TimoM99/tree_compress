@@ -171,10 +171,11 @@ def find_ocs(at, timeout, memory_limit):
     out_of_resources = False
     memory_limit_reached = False
 
-    doms = {'positive': np.full((0,0,2), 0), 'negative': np.full((0,0,2), 0)}
-    inds = {'positive': np.full((0,0), 0), 'negative': np.full((0,0), 0)}
+    doms = np.full((0,0,2), 0)
+    inds = np.full((0,0), 0)
+    preds = np.full((0,), 0)
     try:
-        inds, doms = run_with_timeout_and_memory(
+        inds, doms, preds = run_with_timeout_and_memory(
             enumerate_ocs, at, timeout=timeout, mem_limit=memory_limit
         )
     except (TimeoutError, MemoryError) as e:
@@ -184,7 +185,7 @@ def find_ocs(at, timeout, memory_limit):
     
     time_taken = time.time() - start_time
 
-    return inds, doms, out_of_resources, time_taken, memory_limit_reached
+    return inds, doms, preds, out_of_resources, time_taken, memory_limit_reached
 
 def enumerate_ocs(at):
     doms = None
@@ -211,12 +212,7 @@ def enumerate_ocs(at):
         else:
             doms, inds, preds = cross_product(doms, inds, preds, leaf_doms, leaf_inds, leaf_preds)
 
-    labels = preds > 0.0
-
-    inds = {'positive': inds[labels], 'negative': inds[~labels]}
-    doms = {'positive': doms[labels], 'negative': doms[~labels]}
-    
-    return inds, doms
+    return inds, doms, preds
 
 
 @njit
@@ -327,12 +323,15 @@ def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
 
 
 @njit
-def min_dist_to_solutions(example, all_inds, all_doms, n_intervals):
+def min_dist_to_solutions(example, target_label, all_inds, all_doms, preds, n_intervals):
     min_dist = 1e18
     for s in range(n_intervals):
         max_dist = 0.0
         inds = all_inds[s]
         doms = all_doms[s]
+        pred = preds[s]
+        if (pred > 0.0) != target_label:
+            continue
         for i in range(len(inds)):
             idx = inds[i]
             if idx == -1:
@@ -400,15 +399,9 @@ def exact_emp_robustness(at, example, target_label):
     except IndexError:
         return 1e18
 
-def emp_robustness_linear_scan(inds, doms, example, target_label):
-    if target_label:
-        inds = inds['positive']
-        doms = doms['positive']
-    else:
-        inds = inds['negative']
-        doms = doms['negative']
+def emp_robustness_linear_scan(inds, doms, preds,example, target_label):
 
-    min_dist = min_dist_to_solutions(example, inds, doms, len(inds))
+    min_dist = min_dist_to_solutions(example, target_label, inds, doms, preds, len(inds))
 
     return min_dist
 
@@ -451,7 +444,7 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
     elif method == 'approx':
         f = partial(approx_emp_robustness, at, 1.0)
     elif method == 'linear_scan':
-        inds, doms, out_of_resources, time_taken, memory_limit_reached = find_ocs(at, timeout, memory_limit)
+        inds, doms, preds, out_of_resources, time_taken, memory_limit_reached = find_ocs(at, timeout, memory_limit)
         # print(sys.getsizeof(inds), sys.getsizeof(doms))
         # print(inds['positive'].shape)
         # print(inds['positive'].size*inds['positive'].itemsize)
@@ -461,13 +454,14 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
         # inds, doms = get_inds_doms(pos_solutions, neg_solutions)
         # print(sys.getsizeof(inds) + sys.getsizeof(doms))
         # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
-        f = partial(emp_robustness_linear_scan, inds, doms)
-        result['oc_space'] = len(inds['positive']) + len(inds['negative'])
+        f = partial(emp_robustness_linear_scan, inds, doms, preds)
+        result['oc_space'] = inds.shape[0]
         result['failed_oc'] = out_of_resources
         result['time_taken_oc'] = time_taken
         result['memory_limit_reached'] = memory_limit_reached
         result['doms'] = doms
         result['inds'] = inds
+        result['preds'] = preds
     t = time.time()
     for i in x.index:
         target_label = not (y.loc[i] > 0.0)
@@ -590,4 +584,4 @@ def run_verification_tasks(at, x, y, timeout, memory_limit, n):
         # "isfair": isfair,
         # "fair_timeout": fair_timeout,
         # "fair_time": fair_time,
-    }, result_exact_emp_rob_linear_scan['doms'], result_exact_emp_rob_linear_scan['inds']
+    }, result_exact_emp_rob_linear_scan['doms'], result_exact_emp_rob_linear_scan['inds'], result_exact_emp_rob_linear_scan['preds']

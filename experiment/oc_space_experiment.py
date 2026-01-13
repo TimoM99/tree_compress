@@ -1,3 +1,5 @@
+from operator import is_
+from tabnanny import verbose
 import click
 
 import os
@@ -90,23 +92,14 @@ def verify_compressed_models_cmd(dname, seed, silent, timeout, fold):
 @click.option("--memory_limit", default=64*1024*1024*1024)
 @click.option("--fold", default=0)
 @click.option("--fronts_file", default='pareto_fronts_LOP.pkl')
-@click.option("--save", is_flag=True, default=True)
-def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, fronts_file, save):
+@click.option("--save", is_flag=True, default=False)
+@click.option("--verbose", is_flag=True, default=False)
+def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, fronts_file, save, verbose):
     np.random.seed(seed)
     random.seed(seed)
     pareto_fronts_file = fronts_file
 
     d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
-
-    # Load in results that we already have from linear scan
-    results_linear_scan = {}
-    with open('results/linear_scan_after_LOP.txt', 'r') as file: #Load in the linear scan results
-        for line in file:
-            if not line.startswith('{'):
-                continue
-            line_dict = json.loads(line.strip())
-            key = f"{line_dict['dname']}_{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}_{line_dict['fold']}"
-            results_linear_scan[key] = line_dict
 
     # Load in the pareto fronts
     with open(pareto_fronts_file, 'rb') as f:
@@ -129,7 +122,7 @@ def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, f
                         (pareto_fronts['learning_rate'].astype(float) == float(line_dict['params']['learning_rate']))]['on_front'].values[0] == False:
                 continue # Not on pareto front, skip
 
-            elif os.path.isfile(f'/cw/dtailocal/timo/OCs/OC_boxes_positive_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy'):
+            elif os.path.isfile(f'/cw/dtailocal/timo/OCs/OC_boxes_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy'):
                 continue # Already verified and saved
 
             else: 
@@ -152,22 +145,23 @@ def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, f
                 model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
                 assert line_dict['refinements'][3]['penalty'] == 'ours'
 
-                verification_results, doms, inds = run_verification_tasks(model, dtest.X, dtest.y, timeout=timeout, memory_limit=memory_limit, n=500)
+                verification_results, doms, inds, preds = run_verification_tasks(model, dtest.X, dtest.y, timeout=timeout, memory_limit=memory_limit, n=500)
+                if verbose:
+                    print('Model verified')
                 
                 if save:
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_boxes_positive_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}', doms['positive'])
-                    np.save(f'/cw/dtailocal/timo/OCs//OC_boxes_negative_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}', doms['negative'])
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_feature_indices_positive_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}', inds['positive'])
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_feature_indices_negative_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}', inds['negative'])
-
+                    np.save(f'/cw/dtailocal/timo/OCs/OC_boxes_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', doms)
+                    np.save(f'/cw/dtailocal/timo/OCs/OC_inds_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', inds)
+                    np.save(f'/cw/dtailocal/timo/OCs/OC_preds_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', preds)
+                
                 results['compression'] = {
                     'verification_results': verification_results,
                     'nleafs': model.num_leafs(),
                     'nnodes': model.num_nodes(),
-                    'observed_oc_space_training': calculate_observable_oc_space(x=dtrain.X.to_numpy(), at=model),
-                    'observed_oc_space_test': calculate_observable_oc_space(x=dtest.X.to_numpy(), at=model),
-                    'oc_score_training': calculate_oc_score(x=dtrain.X.to_numpy(), y=dtrain.y.to_numpy(), at=model),
-                    'oc_score_test': calculate_oc_score(x=dtest.X.to_numpy(), y=dtest.y.to_numpy(), at=model),
+                    # 'observed_oc_space_training': calculate_observable_oc_space(x=dtrain.X.to_numpy(), at=model),
+                    # 'observed_oc_space_test': calculate_observable_oc_space(x=dtest.X.to_numpy(), at=model),
+                    # 'oc_score_training': calculate_oc_score(x=dtrain.X.to_numpy(), y=dtrain.y.to_numpy(), at=model),
+                    # 'oc_score_test': calculate_oc_score(x=dtest.X.to_numpy(), y=dtest.y.to_numpy(), at=model),
                     'oc_space_bound': bound_oc_space(model),
                     'mtest': dtest.metric(model),
                     'mvalid': dvalid.metric(model),
