@@ -73,23 +73,24 @@ def create_numba_addtree_boxes(boxes):
     return nboxes
 
 
-@numba.njit
-def testnumba(nboxes):
-    print("hello", nboxes.offset[1])
-
-    print(nboxes.get_lohis(0)[0])
-    print(nboxes.get_lohis(0)[1])
-    print("jaja", nboxes.get_lvals(0))
-
 @numba.jit
 def intersect_lo(los_in1, los_in2, los_out):
     for i in range(len(los_in1)):
         los_out[i] = max(los_in1[i], los_in2[i])
 
+
 @numba.jit
 def intersect_hi(his_in1, his_in2, his_out):
     for i in range(len(his_in1)):
         his_out[i] = min(his_in1[i], his_in2[i])
+
+
+@numba.jit
+def overlaps(los0, his0, los1, his1):
+    overlap = True  # intentionally branchless
+    for l0, h0, l1, h1 in zip(los0, his0, los1, his1):
+        overlap &= (l0 <= h1) & (h0 > l1)
+    return overlap
 
 
 @numba.njit
@@ -100,8 +101,10 @@ def enumerate_ocs_recursive(nboxes, tree_index):
         los, his = nboxes.get_lohis(tree_index)
         ws1 = nboxes._workspace[tree_index+1, :, :]
 
+
         for lid in range(los.shape[0]):
-            #print(lid, ws0[0, :].shape, los[lid, :].shape)
+            if not overlaps(ws0[0, :], ws0[1, :], los[lid, :], his[lid, :]):
+                continue
             intersect_lo(ws0[0, :], los[lid, :], ws1[0, :])
             intersect_hi(ws0[1, :], his[lid, :], ws1[1, :])
 
@@ -123,11 +126,13 @@ def enumerate_ocs_recursive(nboxes, tree_index):
 
 def enumerate_ocs(at):
     splits = at.get_splits()
+    feat_ids = sorted(splits.keys())
+    num_feats = len(feat_ids)
 
-    feat_map = np.full(max(splits.keys())+1, -1, dtype=int)
-    for i, fid in enumerate(sorted(splits.keys())):
+    feat_map = np.full(max(feat_ids)+1, -1, dtype=int)
+    for i, fid in enumerate(feat_ids):
         feat_map[fid] = i
-    num_feats = len(feat_map)
+    print("feat_map", feat_map, "num used features", num_feats, "max feature id", max(feat_ids))
 
     boxes = AddTreeBoxes(at, feat_map)
 
