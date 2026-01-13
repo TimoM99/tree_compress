@@ -94,8 +94,9 @@ def overlaps(los0, his0, los1, his1):
 
 
 @numba.njit
-def enumerate_ocs_recursive(nboxes, tree_index):
+def enumerate_ocs_recursive(nboxes, tree_index, outvalue):
     ws0 = nboxes._workspace[tree_index, :, :]
+    lvals = nboxes.get_lvals(tree_index)
 
     if tree_index < nboxes.num_trees():
         los, his = nboxes.get_lohis(tree_index)
@@ -109,10 +110,10 @@ def enumerate_ocs_recursive(nboxes, tree_index):
             intersect_hi(ws0[1, :], his[lid, :], ws1[1, :])
 
             #print(ws1)
-            enumerate_ocs_recursive(nboxes, tree_index+1)
+            enumerate_ocs_recursive(nboxes, tree_index+1, outvalue+lvals[lid])
 
     else:
-        print(ws0)
+        print(ws0, "→", outvalue)
 
 
 
@@ -156,9 +157,7 @@ def enumerate_ocs(at):
 
     nboxes = create_numba_addtree_boxes(boxes)
     nboxes.reset_workspace()
-    enumerate_ocs_recursive(nboxes, 0)
-
-
+    enumerate_ocs_recursive(nboxes, 0, at.get_base_score(0))
 
 
 
