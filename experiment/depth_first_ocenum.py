@@ -1,4 +1,5 @@
 import os
+os.environ['PRADA_DATA_DIR']='/cw/dtaijupiter/NoCsBack/dtai/timo/prada_data'
 import veritas
 import prada
 import numpy as np
@@ -116,15 +117,6 @@ def enumerate_ocs_recursive(nboxes, tree_index, outvalue):
         print(ws0, "→", outvalue)
 
 
-
-
-
-
-
-
-
-
-
 def enumerate_ocs(at):
     splits = at.get_splits()
     feat_ids = sorted(splits.keys())
@@ -137,10 +129,12 @@ def enumerate_ocs(at):
 
     boxes = AddTreeBoxes(at, feat_map)
 
+    # Define the boxes of all leaves on every tree
     for m, t in enumerate(at):
         leaf_ids = t.get_leaf_ids()
         num_leaves = len(leaf_ids)
 
+        # Keep track of the leaf values as well
         lvals = np.array([t.get_leaf_value(lid, 0) for lid in leaf_ids], dtype=np.float32)
         los = np.full((num_leaves, num_feats), -np.inf, dtype=np.float32)
         his = np.full_like(los, np.inf)
@@ -171,6 +165,7 @@ if __name__ == "__main__":
         at = veritas.AddTree.read(test_model_file, compressed=True)
 
     else:
+        # Load dataset
         d = prada.get_dataset(dname, seed=seed, silent=False)
         d.load_dataset()
         d.robust_normalize()
@@ -179,7 +174,7 @@ if __name__ == "__main__":
 
         if d.is_binary():
             d.use_balanced_accuracy()
-
+        
         dtrain, dtest = d.train_and_test_fold(0, nfolds=4)
 
         model_type = "xgb"
@@ -194,6 +189,8 @@ if __name__ == "__main__":
             "learning_rate": 1.0,
         }
         clf, _ = dtrain.train(model_class, params)
+
+        # Transfer to Veritas AddTree
         at = veritas.get_addtree(clf)
 
         veritas.test_conversion(at, dtrain.X, clf.predict_proba(dtrain.X)[:, 1])
