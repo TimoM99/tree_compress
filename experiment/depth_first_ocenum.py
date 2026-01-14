@@ -1,5 +1,4 @@
 import os
-os.environ['PRADA_DATA_DIR']='/cw/dtaijupiter/NoCsBack/dtai/timo/prada_data'
 import veritas
 import prada
 import numpy as np
@@ -74,7 +73,7 @@ def create_numba_addtree_boxes(boxes):
 
     offsets = np.zeros(len(boxes.at)+1, dtype=np.int64)
     for i in range(1, len(boxes.at)):
-        offsets[i] = offsets[i-1] + boxes.los[i].shape[0]
+        offsets[i] = offsets[i-1] + boxes.los[i - 1].shape[0]
     offsets[-1] = stacked_lvals.shape[0]
 
     nboxes = NumbaAddTreeBoxes(
@@ -104,7 +103,7 @@ def intersect_hi(his_in1, his_in2, his_out):
 def overlaps(los0, his0, los1, his1):
     overlap = True  # intentionally branchless
     for l0, h0, l1, h1 in zip(los0, his0, los1, his1):
-        overlap &= (l0 <= h1) & (h0 > l1)
+        overlap &= (l0 < h1) & (h0 > l1)
     return overlap
 
 
@@ -140,7 +139,7 @@ def enumerate_ocs_stack(nboxes, tree_index, box_buffer, outvalue_buffer):
             break
 
         ws0 = nboxes._workspace[tree_index, :, :]
-        lid = nboxes._lids[tree_index]
+        lid = nboxes._lids[tree_index] # Keeps track of which leaf we're at in this tree
         los, his = nboxes.get_lohis(tree_index)
         lvals = nboxes.get_lvals(tree_index)
         num_leaves = los.shape[0]
@@ -161,7 +160,6 @@ def enumerate_ocs_stack(nboxes, tree_index, box_buffer, outvalue_buffer):
             intersect_hi(ws0[1, :], his[lid, :], ws1[1, :])
 
             outvalue = nboxes._outvalues[tree_index] + lvals[lid]
-            nboxes._outvalues[tree_index]
             if tree_index == num_trees - 1:  # solution, no more next tree to move to
                 #print(ws1, "→", outvalue, "solution", buffer_index)
                 box_buffer[buffer_index, 0, :] = ws1[0, :]
@@ -173,13 +171,6 @@ def enumerate_ocs_stack(nboxes, tree_index, box_buffer, outvalue_buffer):
                 nboxes._outvalues[tree_index] = outvalue
 
     return tree_index, buffer_index
-
-
-
-
-
-
-
 
 
 def enumerate_ocs(at):
@@ -198,7 +189,6 @@ def enumerate_ocs(at):
     for m, t in enumerate(at):
         leaf_ids = t.get_leaf_ids()
         num_leaves = len(leaf_ids)
-
         # Keep track of the leaf values as well
         lvals = np.array([t.get_leaf_value(lid, 0) for lid in leaf_ids], dtype=np.float32)
         los = np.full((num_leaves, num_feats), -np.inf, dtype=np.float32)
@@ -216,10 +206,6 @@ def enumerate_ocs(at):
 
     nboxes = create_numba_addtree_boxes(boxes)
     nboxes.reset_workspace()
-    enumerate_ocs_recursive(nboxes, 0, at.get_base_score(0))
-
-    print()
-    print("NON RECURSIVE")
 
     tree_index = 0
     buffer_size = 10
@@ -227,6 +213,7 @@ def enumerate_ocs(at):
     outvalue_buffer = np.zeros(buffer_size, dtype=np.float32)
     nboxes.reset_workspace()
 
+    total_solutions = 0
     while True:
         box_buffer[:, :, :] = 0.0
         outvalue_buffer[:] = 0.0
@@ -235,13 +222,13 @@ def enumerate_ocs(at):
         )
 
         # do something with the stuff in the buffer (e.g. write to file, index, ...)
-        print(outvalue_buffer[:num_solutions])
-        print(box_buffer[:num_solutions, :, :])
+        # print(outvalue_buffer[:num_solutions])
+        # print(box_buffer[:num_solutions, :, :])
+        total_solutions += num_solutions
 
         if num_solutions < buffer_size:  # we're done, nothing more was written to the buffer
             break
-
-
+    print("total solutions found:", total_solutions)
 
 if __name__ == "__main__":
     test_model_file = "testmodel.at"
@@ -272,8 +259,8 @@ if __name__ == "__main__":
         params = {
             "random_state": seed,
             "n_jobs": 1,
-            "n_estimators": 2,
-            "max_depth": 2,
+            "n_estimators": 10,
+            "max_depth": 4,
             "learning_rate": 1.0,
         }
         clf, _ = dtrain.train(model_class, params)
@@ -286,4 +273,3 @@ if __name__ == "__main__":
         at.write(test_model_file, compressed=True)
 
     enumerate_ocs(at)
-
