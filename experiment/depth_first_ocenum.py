@@ -13,6 +13,39 @@ import index
 
 from dataclasses import dataclass, field
 
+class DiskSaver:
+    def __init__(self, filename, feat_map):
+        num_feats = np.where(feat_map >= 0)[0].shape[0]
+        self.f = h5py.File(filename, "w")
+        self.dset_boxes = self.f.create_dataset("boxes", 
+                                               shape=(0, 2, num_feats), 
+                                               maxshape=(None, 2, num_feats), 
+                                               dtype=np.float32, 
+                                               chunks=(8192, 2, num_feats),
+                                               compression='gzip',
+                                               compression_opts=4,)
+        self.dset_outvalues = self.f.create_dataset("outvalues", 
+                                                   shape=(0,), 
+                                                   maxshape=(None,), 
+                                                   dtype=np.float32,
+                                                   chunks=(8192,))
+        self.f.attrs["feat_map"] = feat_map
+        self.f.attrs["num_solutions"] = 0
+
+    def store(self, box_buffer, outvalue_buffer, num_solutions):
+        self.dset_boxes.resize(self.dset_boxes.shape[0] + num_solutions, axis=0)
+        self.dset_boxes[-num_solutions:, :, :] = box_buffer[:num_solutions, :, :]
+        self.dset_outvalues.resize(self.dset_outvalues.shape[0] + num_solutions, axis=0)
+        self.dset_outvalues[-num_solutions:] = outvalue_buffer[:num_solutions]
+        self.f.attrs['num_solutions'] += num_solutions
+        self.f.flush()
+
+    def get_num_solutions(self):
+        return self.f.attrs["num_solutions"]
+    
+    def close(self):
+        self.f.close()
+
 
 @dataclass
 class AddTreeBoxes:
@@ -219,24 +252,25 @@ def enumerate_ocs(at, filename, buffer_size, timeout=None):
     outvalue_buffer = np.zeros(buffer_size, dtype=np.float32)
     nboxes.reset_workspace()
 
-    f = h5py.File(filename, "w")
-    dset_boxes = f.create_dataset("boxes", 
-                                  shape=(0, 2, num_feats), 
-                                  maxshape=(None, 2, num_feats), 
-                                  dtype=np.float32, 
-                                  chunks=(8192, 2, num_feats),
-                                  compression='gzip',
-                                  compression_opts=4,)
+    ds = DiskSaver(filename, feat_map)
+    # f = h5py.File(filename, "w")
+    # dset_boxes = f.create_dataset("boxes", 
+    #                               shape=(0, 2, num_feats), 
+    #                               maxshape=(None, 2, num_feats), 
+    #                               dtype=np.float32, 
+    #                               chunks=(8192, 2, num_feats),
+    #                               compression='gzip',
+    #                               compression_opts=4,)
 
-    dset_outvalues = f.create_dataset("outvalues", 
-                                      shape=(0,), 
-                                      maxshape=(None,), 
-                                      dtype=np.float32,
-                                      chunks=(8192,))
+    # dset_outvalues = f.create_dataset("outvalues", 
+    #                                   shape=(0,), 
+    #                                   maxshape=(None,), 
+    #                                   dtype=np.float32,
+    #                                   chunks=(8192,))
 
 
-    f.attrs["feat_map"] = feat_map
-    f.attrs["num_solutions"] = 0
+    # f.attrs["feat_map"] = feat_map
+    # f.attrs["num_solutions"] = 0
 
     failed = True
     time_start = time.time()
@@ -247,23 +281,25 @@ def enumerate_ocs(at, filename, buffer_size, timeout=None):
         tree_index, num_solutions = enumerate_ocs_stack(
             nboxes, tree_index, box_buffer, outvalue_buffer
         )
-        
+        print(f"Found {num_solutions} solutions, tree_index={tree_index}")
+        rootbox_index.store(ds.get_num_solutions(), box_buffer[:num_solutions, :, :]) #important order here!
+        ds.store(box_buffer, outvalue_buffer, num_solutions)
         # do something with the stuff in the buffer (e.g. write to file, index, ...)
-        dset_boxes.resize(dset_boxes.shape[0] + num_solutions, axis=0)
-        dset_boxes[-num_solutions:, :, :] = box_buffer[:num_solutions, :, :]
-        dset_outvalues.resize(dset_outvalues.shape[0] + num_solutions, axis=0)
-        dset_outvalues[-num_solutions:] = outvalue_buffer[:num_solutions]
-        rootbox_index.store(f.attrs['num_solutions'], box_buffer[:num_solutions, :, :])
+        # dset_boxes.resize(dset_boxes.shape[0] + num_solutions, axis=0)
+        # dset_boxes[-num_solutions:, :, :] = box_buffer[:num_solutions, :, :]
+        # dset_outvalues.resize(dset_outvalues.shape[0] + num_solutions, axis=0)
+        # dset_outvalues[-num_solutions:] = outvalue_buffer[:num_solutions]
+        
 
-        f.attrs['num_solutions'] += num_solutions
-        f.attrs['progress'] = nboxes._lids.tolist()
-        f.flush()
+        # f.attrs['num_solutions'] += num_solutions
+        # f.attrs['progress'] = nboxes._lids.tolist()
+        # f.flush()
         if num_solutions < buffer_size:  # we're done, nothing more was written to the buffer
             failed = False
             break
     
     rootbox_index.dump(filename)
-    return failed, time.time() - time_start, f.attrs['num_solutions']
+    return failed, time.time() - time_start, ds.get_num_solutions()
 
 if __name__ == "__main__":
     test_model_file = "testmodel.at"

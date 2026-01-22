@@ -491,7 +491,6 @@ def emp_robustness_linear_scan(oc_file, x, y, time_limit):
     feat_map = f.attrs['feat_map']
 
     active_map = np.where(feat_map != -1)[0]
-    feat_map = feat_map[active_map]
 
     buffer_size = boxes.chunks[0]
 
@@ -512,7 +511,6 @@ def emp_robustness_linear_scan(oc_file, x, y, time_limit):
         n = min(buffer_size, num_boxes - i)
         boxes.read_direct(_boxes[:n], np.s_[i:i+n])
         preds.read_direct(_preds[:n], np.s_[i:i+n])
-
         time_reading += time.perf_counter() - t
         total_bytes += _boxes[:n].nbytes + _preds[:n].nbytes
         # print(_preds)
