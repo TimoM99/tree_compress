@@ -1,11 +1,14 @@
 from functools import partial
 import time
 from unittest import result
-from torch import neg
+from sklearn.preprocessing import TargetEncoder
+from torch import ne, neg
 import veritas
 from numba import njit
 import numpy as np
 import sys
+import h5py
+import index as index
 
 import resource
 from multiprocessing import Process, Pipe
@@ -323,87 +326,222 @@ def merge_doms(dom, ind, leaf_dom, leaf_ind, dom_result, ind_result):
 
 
 @njit
-def min_dist_to_solutions(example, target_label, all_inds, all_doms, preds, n_intervals):
-    min_dist = 1e18
-    for s in range(n_intervals):
+def dist_to_boxes(example, boxes, feat_map):
+    # _boxes = boxes[(preds > 0.0) == target_label]
+    dist = np.zeros((boxes.shape[0],), dtype=np.float64)
+    for s in range(boxes.shape[0]):
         max_dist = 0.0
-        inds = all_inds[s]
-        doms = all_doms[s]
-        pred = preds[s]
-        if (pred > 0.0) != target_label:
-            continue
-        for i in range(len(inds)):
-            idx = inds[i]
-            if idx == -1:
-                break
-            x = example[idx]
-            low, high = doms[i, 0], doms[i, 1]
-            if x < low:
-                d = low - x
-            elif x > high:
-                d = x - high
-            else:
-                d = 0.0
+        los = boxes[s, 0]
+        his = boxes[s, 1]
+        for idx, i in enumerate(feat_map):
+            # idx = feat_map[i]
+            # print(idx)
+            # if idx == -1:
+            #     continue
+            x = example[i]
+            lo, hi = los[idx], his[idx]
+
+            d = 0
+            t = lo - x
+            if t > 0.0:
+                d = t
+            t = x - hi
+            if t > d:
+                d = t
+
             if d > max_dist:
                 max_dist = d
+            # if x < lo:
+            #     d = lo - x
+            # elif x > hi:
+            #     d = x - hi
+            # else:
+            #     d = 0.0
+            # if d > max_dist:
+            #     max_dist = d
+        dist[s] = max_dist
+    return dist
+
+@njit
+def min_dist_to_solutions(example, boxes, feat_map):
+    # _boxes = boxes[(preds > 0.0) == target_label]
+    min_dist = 1e18
+    for s in range(boxes.shape[0]):
+        max_dist = 0.0
+        los = boxes[s, 0]
+        his = boxes[s, 1]
+        for idx, i in enumerate(feat_map):
+            # idx = feat_map[i]
+            # print(idx)
+            # if idx == -1:
+            #     continue
+            x = example[i]
+            lo, hi = los[idx], his[idx]
+
+            d = 0
+            t = lo - x
+            if t > 0.0:
+                d = t
+            t = x - hi
+            if t > d:
+                d = t
+
+            if d > max_dist:
+                max_dist = d
+                if max_dist >= min_dist:
+                    break
+            # if x < lo:
+            #     d = lo - x
+            # elif x > hi:
+            #     d = x - hi
+            # else:
+            #     d = 0.0
+            # if d > max_dist:
+            #     max_dist = d
         if max_dist < min_dist:
             min_dist = max_dist
     return min_dist
 
 
-def approx_emp_robustness(at, max_delta, example, target_label):
-    if target_label:
-        source_at, target_at = None, at
-    else:
-        source_at, target_at = at, None
+def approx_emp_robustness(at, max_delta, x, y, time_limit):
+    t0 = time.time()
     
-    start_delta = max_delta
-    rob = veritas.VeritasRobustnessSearch(
-        example, start_delta, source_at, target_at, silent=True
-    )
-    delta, delta_lo, delta_hi = rob.search()
+    delta_lo = np.zeros(x.shape[0])
+    verification_times = np.zeros(x.shape[0])
+    count = 0
+    
+    for i, (example, target_label) in enumerate(zip(x, y)):
+        t = time.time()
+        if target_label:
+            source_at, target_at = None, at
+        else:
+            source_at, target_at = at, None
+        
+        start_delta = max_delta
+        rob = veritas.VeritasRobustnessSearch(
+            example, start_delta, source_at, target_at, silent=True
+        )
+        _, _delta_lo, _ = rob.search()
+        
+        delta_lo[i] = _delta_lo
+        verification_times[i] = time.time() - t
+        count += 1
 
-    return delta_lo
+        if time.time() - t0 >= time_limit:
+            break
+
+    return {'emp_rob': np.mean(delta_lo), 'emp_rob_n': count, 'emp_rob_time': time.time() - t0, 'verification_times': verification_times.tolist(), 'robustness_values': delta_lo.tolist()}
 
 
-def exact_emp_robustness_bounded(at, max_delta, example, target_label):
+# def exact_emp_robustness_bounded(at, max_delta, example, target_label):
+#     from gurobipy import GRB
+
+#     # By putting a box around the example, we make the search space smaller.
+#     box = [veritas.Interval(x-max_delta, x+max_delta) for x in example]
+#     at_pruned = at.prune(box)
+#     kan = veritas.KantchelianAttack(at_pruned, target_label, example)
+#     kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
+#     kan.model.setParam(GRB.Param.Threads, 1)
+#     kan.optimize()
+#     try:
+#         return min(max_delta, kan.bounds[-1][0])
+#     except IndexError:
+#         return max_delta
+
+#     #def linf(x, y):
+#     #    return np.max(np.abs(x-y))
+
+#     #return linf(example, kan.solution()[0])
+
+def exact_emp_robustness(at, x, y, time_limit):
     from gurobipy import GRB
 
-    # By putting a box around the example, we make the search space smaller.
-    box = [veritas.Interval(x-max_delta, x+max_delta) for x in example]
-    at_pruned = at.prune(box)
-    kan = veritas.KantchelianAttack(at_pruned, target_label, example)
-    kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
-    kan.model.setParam(GRB.Param.Threads, 1)
-    kan.optimize()
-    try:
-        return min(max_delta, kan.bounds[-1][0])
-    except IndexError:
-        return max_delta
+    t0 = time.time()
+    delta_lo = np.zeros(x.shape[0], np.float64)
+    verification_times = np.zeros(x.shape[0])
+    count = 0
 
-    #def linf(x, y):
-    #    return np.max(np.abs(x-y))
+    for i, (example, target_label) in enumerate(zip(x, y)):
+        t = time.time()
+        kan = veritas.KantchelianAttack(at, target_label, example)
+        kan.model.setParam(GRB.Param.TimeLimit, time_limit - (time.time() - t))
+        kan.model.setParam(GRB.Param.Threads, 1)
+        kan.optimize()
+        
+        try:
+            delta_lo[i] = kan.bounds[-1][0]
+        except IndexError:
+            delta_lo[i] = 1e18
+        count += 1
+        verification_times[i] = time.time() - t
+        if np.sum(verification_times) >= time_limit:
+            break
 
-    #return linf(example, kan.solution()[0])
+    return {'emp_rob': np.mean(delta_lo), 'emp_rob_n': count, 'emp_rob_time': time.time() - t0, 'verification_times': verification_times.tolist(), 'robustness_values': delta_lo.tolist()}
 
-def exact_emp_robustness(at, example, target_label):
-    from gurobipy import GRB
+def emp_robustness_linear_scan(oc_file, x, y, time_limit):
+    t0 = time.time()
+    f = h5py.File(oc_file, "r") #cache size doesn't matter because we are reading sequentially
 
-    kan = veritas.KantchelianAttack(at, target_label, example)
-    kan.model.setParam(GRB.Param.TimeLimit, 10*60.0)
-    kan.model.setParam(GRB.Param.Threads, 1)
-    kan.optimize()
-    # print(kan.bounds)
-    try:
-        return kan.bounds[-1][0]
-    except IndexError:
-        return 1e18
+    boxes = f['boxes']
+    preds = f['outvalues']
 
-def emp_robustness_linear_scan(inds, doms, preds,example, target_label):
 
-    min_dist = min_dist_to_solutions(example, target_label, inds, doms, preds, len(inds))
+    num_boxes = f.attrs['num_solutions']
+    feat_map = f.attrs['feat_map']
 
-    return min_dist
+    active_map = np.where(feat_map != -1)[0]
+    feat_map = feat_map[active_map]
+
+    buffer_size = boxes.chunks[0]
+
+    # print(len(feat_map))
+
+    total_bytes = 0 
+    time_reading = 0.0
+    verification_times = np.zeros(x.shape[0])
+    count = 500
+
+    _boxes = np.zeros((buffer_size, boxes.shape[1], boxes.shape[2]), dtype=boxes.dtype)
+    _preds = np.zeros((buffer_size,), dtype=preds.dtype)
+
+    min_dist_arr = np.full((x.shape[0],), 1e18)
+    for i in range(0, num_boxes, buffer_size):
+        t = time.perf_counter()
+        # print('reading')
+        n = min(buffer_size, num_boxes - i)
+        boxes.read_direct(_boxes[:n], np.s_[i:i+n])
+        preds.read_direct(_preds[:n], np.s_[i:i+n])
+
+        time_reading += time.perf_counter() - t
+        total_bytes += _boxes[:n].nbytes + _preds[:n].nbytes
+        # print(_preds)
+
+        pos_boxes = _boxes[:n][(_preds[:n] > 0.0)]
+
+        neg_boxes = _boxes[:n][(_preds[:n] <= 0.0)]
+        # print(neg_boxes)
+        # print('calculating')
+        for i, (example, target_label) in enumerate(zip(x, y)):
+            # print(example, target_label)
+            t = time.perf_counter()
+            if target_label:
+                boxes_to_consider = pos_boxes
+            else:
+                boxes_to_consider = neg_boxes
+            min_dist_arr[i] = min(min_dist_arr[i], min_dist_to_solutions(example, boxes_to_consider, active_map))
+            verification_times[i] += time.perf_counter() - t
+        # dist = min_dist_to_solutions(x, _boxes[:n], _preds[:n], y, feat_map)
+        # print(dist)
+    
+        if time_reading + np.sum(verification_times) >= time_limit:
+            count = None
+            break
+
+    # print(f"Scanned {num_boxes} boxes in {time_reading:.2f} seconds (reading), {np.sum(verification_times):.2f} seconds (calculating), {total_bytes / (1024**2):.2f} MB read")
+
+
+    return {'emp_rob': np.mean(min_dist_arr), 'emp_rob_n': count, 'emp_rob_time': time.time() - t0, 'time_reading': time_reading, 'verification_times': verification_times.tolist(), 'robustness_values': min_dist_arr.tolist()}
 
 # def get_inds_doms(pos_solutions, neg_solutions):
 #     pos_solutions = [(list(sol.keys()), [(dom.lo, dom.hi) for dom in sol.values()]) for sol in pos_solutions]
@@ -435,16 +573,106 @@ def emp_robustness_linear_scan(inds, doms, preds,example, target_label):
 
 #     return inds, doms
 
-def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024):
-    delta_lo = 0.0
+def emp_robustness_rootbox_index(oc_file, x, y, time_limit):
+    t0 = time.time()
+    rbi = index.RootboxIndex.load(oc_file)
+    f = h5py.File(oc_file, "r") #cache size doesn't matter because we are reading sequentially
+
+    boxes = f['boxes']
+    preds = f['outvalues']
+    feat_map = rbi.featmap
+    active_map = np.where(feat_map != -1)[0]
+
+    buffer_size = boxes.chunks[0]
+    reading_time = 0.0
+    
+    delta_lo = np.full(x.shape[0], 1e18)
+    verification_times = np.zeros(x.shape[0])
+
     count = 0
-    result = {}
-    if method == 'exact':
-        f = partial(exact_emp_robustness, at)
-    elif method == 'approx':
-        f = partial(approx_emp_robustness, at, 1.0)
-    elif method == 'linear_scan':
-        inds, doms, preds, out_of_resources, time_taken, memory_limit_reached = find_ocs(at, timeout, memory_limit)
+    for i, (example, target_label) in enumerate(zip(x, y)):
+        t = time.time()
+        idx = rbi.find_index(example)
+        boxes_ids = rbi.get_boxes_at_index(idx)
+        verification_times[i] += time.time() - t
+        num_solutions = boxes_ids.shape[0]
+
+        # print(example)
+        # print(target_label)
+        _boxes = np.zeros((buffer_size, boxes.shape[1], boxes.shape[2]), dtype=boxes.dtype)
+        _preds = np.zeros((buffer_size,), dtype=preds.dtype)
+        for j in range(0, num_solutions, buffer_size):
+            n = min(buffer_size, num_solutions - j)
+
+            t = time.time()
+            boxes.read_direct(_boxes[:n], np.s_[boxes_ids[j:j+n]])
+            preds.read_direct(_preds[:n], np.s_[boxes_ids[j:j+n]])
+            reading_time += time.time() - t
+
+            pos_boxes = _boxes[:n][(_preds[:n] > 0.0)]
+            neg_boxes = _boxes[:n][(_preds[:n] <= 0.0)]
+
+            t = time.time()
+            delta_lo[i] = min(delta_lo[i], min_dist_to_solutions(example, pos_boxes if target_label else neg_boxes, active_map))
+            verification_times[i] += time.time() - t
+
+        t = time.time()
+        deltas = dist_to_boxes(example, rbi.get_rootboxes(), active_map)
+        sorted_rootboxes = np.argsort(deltas)
+        verification_times[i] += time.time() - t
+        # print(example.dtype)
+        # print(delta_lo[i])
+        # print(delta_lo[i].dtype)
+        # print(deltas)
+        # print(deltas[3])
+        # print(deltas)
+        for ibox in sorted_rootboxes[1:]: #skip the first one, already considered
+            # print(deltas[ibox], delta_lo[i])
+            if deltas[ibox] > delta_lo[i]:
+                continue
+            # print('we get here')
+            t = time.time()
+            boxes_ids = rbi.get_boxes_at_index(ibox)
+            verification_times[i] += time.time() - t
+            # print(boxes_ids)
+            num_solutions = boxes_ids.shape[0]
+
+            for j in range(0, num_solutions, buffer_size):
+                n = min(buffer_size, num_solutions - j)
+
+                t = time.time()
+                boxes.read_direct(_boxes[:n], np.s_[boxes_ids[j:j+n]])
+                preds.read_direct(_preds[:n], np.s_[boxes_ids[j:j+n]])
+                reading_time += time.time() - t
+
+                # print(_boxes)
+
+                # print('checking boxes in rootbox', ibox)
+
+                pos_boxes = _boxes[:n][(_preds[:n] > 0.0)]
+                # print(neg_boxes)
+                neg_boxes = _boxes[:n][(_preds[:n] <= 0.0)]
+                # print(neg_boxes)
+
+                t = time.time()
+                # print(delta_lo[i], min_dist_to_solutions(example, pos_boxes if target_label else neg_boxes, active_map))
+                delta_lo[i] = min(delta_lo[i], min_dist_to_solutions(example, pos_boxes if target_label else neg_boxes, active_map))
+                verification_times[i] += time.time() - t
+            # print(delta_lo[i])
+
+        if time.time() - t0 >= time_limit:
+            break
+        count += 1
+    return {'emp_rob': np.mean(delta_lo), 'emp_rob_n': count, 'emp_rob_time': time.time() - t0, 'verification_times': verification_times.tolist(), 'robustness_values': delta_lo.tolist(), 'time_reading': reading_time}
+
+
+
+def emp_robustness(at, x, y, n, method, time_limit, oc_file=None):
+    # delta_lo = 0.0
+    # count = 0
+    # result = {}
+    
+        # inds, doms, preds, out_of_resources, time_taken, memory_limit_reached = find_ocs(at, timeout, memory_limit)
         # print(sys.getsizeof(inds), sys.getsizeof(doms))
         # print(inds['positive'].shape)
         # print(inds['positive'].size*inds['positive'].itemsize)
@@ -454,33 +682,39 @@ def emp_robustness(at, x, y, n, method, timeout, memory_limit=32*1024*1024*1024)
         # inds, doms = get_inds_doms(pos_solutions, neg_solutions)
         # print(sys.getsizeof(inds) + sys.getsizeof(doms))
         # import os, psutil; print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
-        f = partial(emp_robustness_linear_scan, inds, doms, preds)
-        result['oc_space'] = inds.shape[0]
-        result['failed_oc'] = out_of_resources
-        result['time_taken_oc'] = time_taken
-        result['memory_limit_reached'] = memory_limit_reached
-        result['doms'] = doms
-        result['inds'] = inds
-        result['preds'] = preds
-    t = time.time()
+        # f = partial(emp_robustness_linear_scan, oc_file)
+    # t = time.time()
+    x_correct = []
+    y_correct = []
+    count = 0
     for i in x.index:
         target_label = not (y.loc[i] > 0.0)
         example = x.loc[i, :].to_numpy()
         pred_label = at.eval(example)[0, 0] > 0.0
 
         if pred_label != target_label:
-            res = f(example, target_label)
-            delta_lo += res
+            x_correct.append(example)
+            y_correct.append(target_label)
 
-        count += 1
+            count += 1
         if count >= n:
             break
-        if time.time() - t > timeout:
-            break
-    t = time.time() - t
-    result['emp_rob'] = delta_lo / count
-    result['emp_rob_n'] = count
-    result['emp_rob_time'] = t
+    x_correct = np.array(x_correct)
+    y_correct = np.array(y_correct)
+    if method == 'exact':
+        result = exact_emp_robustness(at, x_correct, y_correct, time_limit)
+    elif method == 'approx':
+        result = approx_emp_robustness(at, 1.0, x_correct, y_correct, time_limit)
+    elif method == 'linear_scan':
+        assert oc_file is not None
+        result = emp_robustness_linear_scan(oc_file, x_correct, y_correct, time_limit)
+    elif method == 'rootbox_index':
+        result = emp_robustness_rootbox_index(oc_file, x_correct, y_correct, time_limit)
+    # t = time.time() - t
+    # result['emp_rob'] = delta_lo / count
+    # result['emp_rob_n'] = count
+    # result['emp_rob_time'] = t
+    result['count'] = count
     return result
 
 
@@ -539,20 +773,23 @@ def fairness_task(at, timeout):
 
     return isfair, has_timed_out or oom, t
 
-def run_verification_tasks(at, x, y, timeout, memory_limit, n):
+def run_verification_tasks(at, x, y, oc_file, timeout, n):
 
     ## VERIFICATION: (1) HOW MANY OCs?
     # nocs, nocs_time, nocs_timeout = count_ocs(at, timeout)
 
     # VERIFICATION: (2) Empricial robustness (exact + approx)
     result_exact_emp_rob_linear_scan = emp_robustness(
-        at, x, y, n, method='linear_scan', timeout=timeout, memory_limit=memory_limit
+        at, x, y, n, method='linear_scan', time_limit=timeout, oc_file=oc_file
+    )
+    result_exact_emp_rob_rootbox_index = emp_robustness(
+        at, x, y, n, method='rootbox_index', time_limit=timeout, oc_file=oc_file
     )
     result_exact_emp_rob = emp_robustness(
-        at, x, y, n, method='exact', timeout=timeout
+        at, x, y, n, method='exact', time_limit=timeout
     )
     result_approx_emp_rob = emp_robustness(
-        at, x, y, n, method='approx', timeout=timeout
+        at, x, y, n, method='approx', time_limit=timeout
     )
 
 
@@ -561,27 +798,35 @@ def run_verification_tasks(at, x, y, timeout, memory_limit, n):
     # isfair, fair_timeout, fair_time = fairness_task(at, timeout)
 
     return {
-        # "nocs": nocs,
-        # "nocs_time": nocs_time,
-        # "nocs_timeout": nocs_timeout,
         "exact_emp_rob": result_exact_emp_rob['emp_rob'],
         "exact_emp_rob_n": result_exact_emp_rob['emp_rob_n'],
         "exact_emp_rob_timeout": result_exact_emp_rob['emp_rob_time'] >= timeout,
         "exact_emp_rob_time": result_exact_emp_rob['emp_rob_time'],
+        "exact_emp_rob_verification_times": result_exact_emp_rob['verification_times'],
+        "exact_emp_rob_robustness_values": result_exact_emp_rob['robustness_values'],
         "approx_emp_rob": result_approx_emp_rob['emp_rob'],
         "approx_emp_rob_n": result_approx_emp_rob['emp_rob_n'],
         "approx_emp_rob_timeout": result_approx_emp_rob['emp_rob_time'] >= timeout,
         "approx_emp_rob_time": result_approx_emp_rob['emp_rob_time'],
+        "approx_emp_rob_verification_times": result_approx_emp_rob['verification_times'],
+        "approx_emp_rob_robustness_values": result_approx_emp_rob['robustness_values'],
         "exact_emp_rob_linear_scan": result_exact_emp_rob_linear_scan['emp_rob'],
         "exact_emp_rob_linear_scan_n": result_exact_emp_rob_linear_scan['emp_rob_n'],
         "exact_emp_rob_linear_scan_timeout": result_exact_emp_rob_linear_scan['emp_rob_time'] >= timeout,
         "exact_emp_rob_linear_scan_time": result_exact_emp_rob_linear_scan['emp_rob_time'],
-        "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
-        "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
-        "time_taken_oc": result_exact_emp_rob_linear_scan['time_taken_oc'],
-        "memory_limit_reached": result_exact_emp_rob_linear_scan['memory_limit_reached'],
-        # "memory_used_oc": result_exact_emp_rob_linear_scan['memory_used_oc'],
-        # "isfair": isfair,
-        # "fair_timeout": fair_timeout,
-        # "fair_time": fair_time,
-    }, result_exact_emp_rob_linear_scan['doms'], result_exact_emp_rob_linear_scan['inds'], result_exact_emp_rob_linear_scan['preds']
+        "exact_emp_rob_linear_scan_reading_time": result_exact_emp_rob_linear_scan['time_reading'],
+        "exact_emp_rob_linear_scan_verification_times": result_exact_emp_rob_linear_scan['verification_times'],
+        "exact_emp_rob_linear_scan_robustness_values": result_exact_emp_rob_linear_scan['robustness_values'],
+        "exact_emp_rob_rootbox_index": result_exact_emp_rob_rootbox_index['emp_rob'],
+        "exact_emp_rob_rootbox_index_n": result_exact_emp_rob_rootbox_index['emp_rob_n'],
+        "exact_emp_rob_rootbox_index_timeout": result_exact_emp_rob_rootbox_index['emp_rob_time'] >= timeout,
+        "exact_emp_rob_rootbox_index_time": result_exact_emp_rob_rootbox_index['emp_rob_time'],
+        "exact_emp_rob_rootbox_index_reading_time": result_exact_emp_rob_rootbox_index['time_reading'],
+        "exact_emp_rob_rootbox_index_verification_times": result_exact_emp_rob_rootbox_index['verification_times'],
+        "exact_emp_rob_rootbox_index_robustness_values": result_exact_emp_rob_rootbox_index['robustness_values'],
+        # "nocs
+        # "oc_space": result_exact_emp_rob_linear_scan['oc_space'],
+        # "failed_oc": result_exact_emp_rob_linear_scan['failed_oc'],
+        # "time_taken_oc": result_exact_emp_rob_linear_scan['time_taken_oc'],
+        # "memory_limit_reached": result_exact_emp_rob_linear_scan['memory_limit_reached'],
+    }
