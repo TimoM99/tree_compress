@@ -1,8 +1,15 @@
+from math import atan
 import os
+import time
 import veritas
 import prada
 import numpy as np
 import numba
+import h5py
+import verification
+import json
+import util
+import index
 
 from dataclasses import dataclass, field
 
@@ -173,7 +180,7 @@ def enumerate_ocs_stack(nboxes, tree_index, box_buffer, outvalue_buffer):
     return tree_index, buffer_index
 
 
-def enumerate_ocs(at):
+def enumerate_ocs(at, filename, buffer_size, timeout=None):
     splits = at.get_splits()
     feat_ids = sorted(splits.keys())
     num_feats = len(feat_ids)
@@ -181,9 +188,9 @@ def enumerate_ocs(at):
     feat_map = np.full(max(feat_ids)+1, -1, dtype=int)
     for i, fid in enumerate(feat_ids):
         feat_map[fid] = i
-    print("feat_map", feat_map, "num used features", num_feats, "max feature id", max(feat_ids))
 
     boxes = AddTreeBoxes(at, feat_map)
+    rootbox_index = index.RootboxIndex(at, feat_map)
 
     # Define the boxes of all leaves on every tree
     for m, t in enumerate(at):
@@ -208,27 +215,55 @@ def enumerate_ocs(at):
     nboxes.reset_workspace()
 
     tree_index = 0
-    buffer_size = 10
     box_buffer = np.zeros((buffer_size, 2, num_feats), dtype=np.float32)
     outvalue_buffer = np.zeros(buffer_size, dtype=np.float32)
     nboxes.reset_workspace()
 
-    total_solutions = 0
-    while True:
+    f = h5py.File(filename, "w")
+    dset_boxes = f.create_dataset("boxes", 
+                                  shape=(0, 2, num_feats), 
+                                  maxshape=(None, 2, num_feats), 
+                                  dtype=np.float32, 
+                                  chunks=(8192, 2, num_feats),
+                                  compression='gzip',
+                                  compression_opts=4,)
+
+    dset_outvalues = f.create_dataset("outvalues", 
+                                      shape=(0,), 
+                                      maxshape=(None,), 
+                                      dtype=np.float32,
+                                      chunks=(8192,))
+
+
+    f.attrs["feat_map"] = feat_map
+    f.attrs["num_solutions"] = 0
+
+    failed = True
+    time_start = time.time()
+    while timeout is None or (time.time() - time_start) < timeout:
         box_buffer[:, :, :] = 0.0
         outvalue_buffer[:] = 0.0
+        
         tree_index, num_solutions = enumerate_ocs_stack(
             nboxes, tree_index, box_buffer, outvalue_buffer
         )
-
+        
         # do something with the stuff in the buffer (e.g. write to file, index, ...)
-        # print(outvalue_buffer[:num_solutions])
-        # print(box_buffer[:num_solutions, :, :])
-        total_solutions += num_solutions
+        dset_boxes.resize(dset_boxes.shape[0] + num_solutions, axis=0)
+        dset_boxes[-num_solutions:, :, :] = box_buffer[:num_solutions, :, :]
+        dset_outvalues.resize(dset_outvalues.shape[0] + num_solutions, axis=0)
+        dset_outvalues[-num_solutions:] = outvalue_buffer[:num_solutions]
+        rootbox_index.store(f.attrs['num_solutions'], box_buffer[:num_solutions, :, :])
 
+        f.attrs['num_solutions'] += num_solutions
+        f.attrs['progress'] = nboxes._lids.tolist()
+        f.flush()
         if num_solutions < buffer_size:  # we're done, nothing more was written to the buffer
+            failed = False
             break
-    print("total solutions found:", total_solutions)
+    
+    rootbox_index.dump(filename)
+    return failed, time.time() - time_start, f.attrs['num_solutions']
 
 if __name__ == "__main__":
     test_model_file = "testmodel.at"
@@ -272,4 +307,8 @@ if __name__ == "__main__":
         print("writing file...")
         at.write(test_model_file, compressed=True)
 
-    enumerate_ocs(at)
+    enumerate_ocs(at, 'testmodel_ocs.h5', 100 * 8192)
+    df = h5py.File('testmodel_ocs.h5', 'r')
+
+    print("num_solutions:", df.attrs["num_solutions"])
+
