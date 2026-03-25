@@ -46,6 +46,11 @@ class DiskSaver:
     def close(self):
         self.f.close()
 
+def get_sub_addtree(at, depth):
+    sub_at = veritas.AddTree(at.num_leaf_values(), at.get_type())
+    for ti in range(depth):
+        sub_at.add_tree(at[ti])
+    return sub_at
 
 @dataclass
 class AddTreeBoxes:
@@ -212,8 +217,115 @@ def enumerate_ocs_stack(nboxes, tree_index, box_buffer, outvalue_buffer):
 
     return tree_index, buffer_index
 
+@numba.njit
+def enumerate_ocs_stack_all(nboxes, tree_index, box_buffer, outvalue_buffer):
+    buffer_index = 0
+    num_trees = nboxes.num_trees()
+    while buffer_index < box_buffer.shape[0]:
+        if tree_index >= num_trees:
+            print("fail")
+            break
 
-def enumerate_ocs(at, filename, buffer_size, timeout=None):
+        ws0 = nboxes._workspace[tree_index, :, :]
+        lid = nboxes._lids[tree_index] # Keeps track of which leaf we're at in this tree
+        los, his = nboxes.get_lohis(tree_index)
+        lvals = nboxes.get_lvals(tree_index)
+        num_leaves = los.shape[0]
+
+        ws1 = nboxes._workspace[tree_index + 1, :, :]
+
+        if lid >= num_leaves:  # all leaves of this tree were considered
+            if tree_index == 0:  # we are done!
+                break
+            nboxes._lids[tree_index] = 0  # start over again with this tree in the next round
+            tree_index -= 1  # backtrack to previous tree
+            continue
+
+        nboxes._lids[tree_index] += 1
+
+        if overlaps(ws0[0, :], ws0[1, :], los[lid, :], his[lid, :]):
+            intersect_lo(ws0[0, :], los[lid, :], ws1[0, :])
+            intersect_hi(ws0[1, :], his[lid, :], ws1[1, :])
+
+            outvalue = nboxes._outvalues[tree_index] + lvals[lid]
+            if tree_index == num_trees - 1:  # solution, no more next tree to move to
+                #print(ws1, "→", outvalue, "solution", buffer_index)
+                box_buffer[buffer_index, 0, :] = ws1[0, :]
+                box_buffer[buffer_index, 1, :] = ws1[1, :]
+                outvalue_buffer[buffer_index] = outvalue
+                buffer_index += 1
+            else:
+                # box_buffer[buffer_index, 0, :] = ws1[0, :]
+                # box_buffer[buffer_index, 1, :] = ws1[1, :]
+                # outvalue_buffer[buffer_index] = outvalue
+                # buffer_index += 1
+                tree_index += 1  # next iteration moves to the next tree
+                nboxes._outvalues[tree_index] = outvalue
+
+    return tree_index, buffer_index
+
+def enumerate_ocs_subset(at, depth, buffer_size, timeout=None):
+    
+    splits = at.get_splits()
+    feat_ids = sorted(splits.keys())
+    num_feats = len(feat_ids)
+
+    feat_map = np.full(max(feat_ids)+1, -1, dtype=int)
+    for i, fid in enumerate(feat_ids):
+        feat_map[fid] = i
+
+    at = get_sub_addtree(at, depth)
+    boxes = AddTreeBoxes(at, feat_map)
+    # rootbox_index = index.RootboxIndex(at, feat_map)
+
+    # Define the boxes of all leaves on every tree
+    for m, t in enumerate(at):
+        leaf_ids = t.get_leaf_ids()
+        num_leaves = len(leaf_ids)
+        # Keep track of the leaf values as well
+        lvals = np.array([t.get_leaf_value(lid, 0) for lid in leaf_ids], dtype=np.float32)
+        los = np.full((num_leaves, num_feats), -np.inf, dtype=np.float32)
+        his = np.full_like(los, np.inf)
+
+        for i, lid in enumerate(leaf_ids):
+            box = t.compute_box(lid)
+            for fid, ival in box.items():
+                los[i, feat_map[fid]] = ival.lo
+                his[i, feat_map[fid]] = ival.hi
+
+        boxes.los.append(los)
+        boxes.his.append(his)
+        boxes.lvals.append(lvals)
+
+    nboxes = create_numba_addtree_boxes(boxes)
+    nboxes.reset_workspace()
+
+    tree_index = 0
+    box_buffer = np.zeros((buffer_size, 2, num_feats), dtype=np.float32)
+    outvalue_buffer = np.zeros(buffer_size, dtype=np.float32)
+    nboxes.reset_workspace()
+
+    failed = True
+    time_start = time.time()
+    while timeout is None or (time.time() - time_start) < timeout:
+        box_buffer[:, :, :] = 0.0
+        outvalue_buffer[:] = 0.0
+        
+        tree_index, num_solutions = enumerate_ocs_stack_all(
+            nboxes, tree_index, box_buffer, outvalue_buffer
+        )
+
+        # rootbox_index.store(ds.get_num_solutions(), box_buffer[:num_solutions, :, :]) #important order here!
+        # ds.store(box_buffer, outvalue_buffer, num_solutions)
+        yield box_buffer[:num_solutions, :, :], outvalue_buffer[:num_solutions]
+        if num_solutions < buffer_size:  # we're done, nothing more was written to the buffer
+            failed = False
+            break
+
+       
+
+
+def enumerate_ocs(at, filename, buffer_size, timeout=None, index=None):
     splits = at.get_splits()
     feat_ids = sorted(splits.keys())
     num_feats = len(feat_ids)
@@ -223,7 +335,7 @@ def enumerate_ocs(at, filename, buffer_size, timeout=None):
         feat_map[fid] = i
 
     boxes = AddTreeBoxes(at, feat_map)
-    rootbox_index = index.RootboxIndex(at, feat_map)
+    # rootbox_index = index.RootboxIndex(at, feat_map)
 
     # Define the boxes of all leaves on every tree
     for m, t in enumerate(at):
@@ -253,24 +365,6 @@ def enumerate_ocs(at, filename, buffer_size, timeout=None):
     nboxes.reset_workspace()
 
     ds = DiskSaver(filename, feat_map)
-    # f = h5py.File(filename, "w")
-    # dset_boxes = f.create_dataset("boxes", 
-    #                               shape=(0, 2, num_feats), 
-    #                               maxshape=(None, 2, num_feats), 
-    #                               dtype=np.float32, 
-    #                               chunks=(8192, 2, num_feats),
-    #                               compression='gzip',
-    #                               compression_opts=4,)
-
-    # dset_outvalues = f.create_dataset("outvalues", 
-    #                                   shape=(0,), 
-    #                                   maxshape=(None,), 
-    #                                   dtype=np.float32,
-    #                                   chunks=(8192,))
-
-
-    # f.attrs["feat_map"] = feat_map
-    # f.attrs["num_solutions"] = 0
 
     failed = True
     time_start = time.time()
@@ -281,25 +375,16 @@ def enumerate_ocs(at, filename, buffer_size, timeout=None):
         tree_index, num_solutions = enumerate_ocs_stack(
             nboxes, tree_index, box_buffer, outvalue_buffer
         )
-        print(f"Found {num_solutions} solutions, tree_index={tree_index}")
-        rootbox_index.store(ds.get_num_solutions(), box_buffer[:num_solutions, :, :]) #important order here!
-        ds.store(box_buffer, outvalue_buffer, num_solutions)
-        # do something with the stuff in the buffer (e.g. write to file, index, ...)
-        # dset_boxes.resize(dset_boxes.shape[0] + num_solutions, axis=0)
-        # dset_boxes[-num_solutions:, :, :] = box_buffer[:num_solutions, :, :]
-        # dset_outvalues.resize(dset_outvalues.shape[0] + num_solutions, axis=0)
-        # dset_outvalues[-num_solutions:] = outvalue_buffer[:num_solutions]
-        
 
-        # f.attrs['num_solutions'] += num_solutions
-        # f.attrs['progress'] = nboxes._lids.tolist()
-        # f.flush()
+        # rootbox_index.store(ds.get_num_solutions(), box_buffer[:num_solutions, :, :]) #important order here!
+        ds.store(box_buffer, outvalue_buffer, num_solutions)
+
         if num_solutions < buffer_size:  # we're done, nothing more was written to the buffer
             failed = False
             break
     
-    rootbox_index.dump(filename)
-    return failed, time.time() - time_start, ds.get_num_solutions()
+    # rootbox_index.dump(filename)
+    return failed, time.time() - time_start, ds.get_num_solutions(), tree_index/len(at)
 
 if __name__ == "__main__":
     test_model_file = "testmodel.at"

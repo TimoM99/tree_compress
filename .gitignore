@@ -18,4 +18,4 @@ build/
 *.pdf
 .flake8
 ruff.toml
-
+gurobi.log

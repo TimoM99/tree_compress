@@ -1,7 +1,12 @@
+import gc
+import resource
+import h5py
+
+resource.setrlimit(resource.RLIMIT_AS, (100*1024*1024*1024, 100*1024*1024*1024))
+
 from operator import is_
 from tabnanny import verbose
 import click
-
 import os
 os.environ['PRADA_DATA_DIR']='/cw/dtaijupiter/NoCsBack/dtai/timo/prada_data'
 
@@ -17,7 +22,8 @@ import util
 import model_params
 
 from sklearn.metrics import balanced_accuracy_score
-from verification import run_verification_tasks, count_ocs
+from verification import run_verification_tasks, run_robustness_task
+from depth_first_ocenum import enumerate_ocs
 import pickle
 
 @click.group()
@@ -84,6 +90,188 @@ def verify_compressed_models_cmd(dname, seed, silent, timeout, fold):
             print(json.dumps(results))
 
 
+@cli.command('verify_saved_OCs')
+@click.argument("dname")
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=86400)
+@click.option("--fold", default=0)
+def verify_saved_OCs_cmd(dname, seed, silent, timeout, fold):
+    np.random.seed(seed)
+    random.seed(seed)
+
+    d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
+
+    # Load in the pareto fronts
+    with open('pareto_fronts_LOP.pkl', 'rb') as f:
+        pareto_fronts = pickle.load(f)
+        pareto_fronts = pareto_fronts[dname]
+
+    verified_models = set()
+    with open(f'results/verify_saved_models.txt', 'r') as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            verified_models.add((f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}"))
+
+    file = f"results/xgb_classification_saved.txt"
+    with open(file, "r") as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            # Check if this model is in the pareto front, if not we don't bother verifying it.
+            if pareto_fronts[(pareto_fronts['n_estimators'].astype(float) == float(line_dict['params']['n_estimators'])) &
+                        (pareto_fronts['max_depth'].astype(float) == float(line_dict['params']['max_depth'])) &
+                        (pareto_fronts['learning_rate'].astype(float) == float(line_dict['params']['learning_rate']))]['on_front'].values[0] == False:
+                continue # Not on pareto front, skip
+            
+            if f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}" in verified_models:
+                continue
+
+            results = {
+                'date_time': util.nowstr(),
+                'hostname': os.uname()[1],
+                'dname': dname,
+                'fold': fold,
+                'seed': seed,
+                'metric_name': line_dict['metric_name'],
+                'mtrain': line_dict['mtrain'],
+                'mvalid': line_dict['mvalid'],
+                'mtest': line_dict['mtest'],
+                'ntrees': line_dict['ntrees'],
+                'nnodes': line_dict['nnodes'],
+                'nleafs': line_dict['nleafs'],
+                'params': line_dict['params'],
+            }
+
+            model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
+            assert line_dict['refinements'][3]['penalty'] == 'ours'
+
+            oc_file = f'/cw/dtaiproj/ml/2026-OCspace/OC_enum_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.h5'
+
+            try:
+                verification_results = run_verification_tasks(model, dtest.X, dtest.y, oc_file=oc_file, timeout=timeout, n=500)
+            except (MemoryError, OSError):
+                verification_results = {'failed_oc': True}
+                gc.collect()
+
+            results['compression'] = {
+                'verification_results': verification_results,
+                'nleafs': model.num_leafs(),
+                'nnodes': model.num_nodes(),
+                'mtest': dtest.metric(model),
+                'mvalid': dvalid.metric(model),
+                'mtrain': dtrain.metric(model)
+            }
+
+            print(json.dumps(results))
+
+@cli.command('enumerate_pareto_models')
+@click.argument("dname")
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=86400)
+@click.option("--fold", default=0)
+@click.option("--verbose", is_flag=True, default=False)
+def verify_pareto_models_cmd(dname, seed, silent, timeout, fold, verbose):
+    np.random.seed(seed)
+    random.seed(seed)
+    pareto_fronts_file = 'pareto_fronts_LOP.pkl'
+
+    d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
+
+    enumerated_models = set()
+    with open(f'results/enumerate_pt1.txt', 'r') as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            enumerated_models.add((f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}"))
+
+    with open(f'results/enumerate_pt2.txt', 'r') as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            enumerated_models.add((f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}"))
+
+    with open(pareto_fronts_file, 'rb') as f:
+        pareto_fronts = pickle.load(f)
+        pareto_fronts = pareto_fronts[dname]
+
+    # Now go over all saved xgb models and verify those that are in the pareto front.
+    file_xgb = f"results/xgb_classification_saved.txt"
+    with open(file_xgb, "r") as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            # Check if this model is in the pareto front, if not we don't bother verifying it.
+            if pareto_fronts[(pareto_fronts['n_estimators'].astype(float) == float(line_dict['params']['n_estimators'])) &
+                        (pareto_fronts['max_depth'].astype(float) == float(line_dict['params']['max_depth'])) &
+                        (pareto_fronts['learning_rate'].astype(float) == float(line_dict['params']['learning_rate']))]['on_front'].values[0] == False:
+                continue # Not on pareto front, skip
+            if f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}" in enumerated_models:
+                continue
+
+            else: 
+                results = {
+                    'date_time': util.nowstr(),
+                    'hostname': os.uname()[1],
+                    'dname': dname,
+                    'fold': fold,
+                    'seed': seed,
+                    'metric_name': line_dict['metric_name'],
+                    'mtrain': line_dict['mtrain'],
+                    'mvalid': line_dict['mvalid'],
+                    'mtest': line_dict['mtest'],
+                    'ntrees': line_dict['ntrees'],
+                    'nnodes': line_dict['nnodes'],
+                    'nleafs': line_dict['nleafs'],
+                    'params': line_dict['params'],
+                }
+
+                model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
+                assert line_dict['refinements'][3]['penalty'] == 'ours'
+
+                oc_file = f'/cw/dtaiproj/ml/2026-OCspace/NoCsBack/OC_enum_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.h5'
+                failed_oc, time_taken_oc, oc_size, pct_completed = enumerate_ocs(model, oc_file, buffer_size=1000*8194, timeout=timeout)
+
+
+                # verification_results = run_verification_tasks(model, dtest.X, dtest.y, oc_file, timeout=timeout, n=500)
+                # verification_results['time_taken_oc'] = time_taken_oc
+                # verification_results['failed_oc'] = failed_oc
+                # verification_results['oc_space'] = int(oc_size) #convert because numpy int cannot be dumped to json
+
+                results['compression'] = {
+                    # 'verification_results': verification_results,
+                    'nleafs': model.num_leafs(),
+                    'nnodes': model.num_nodes(),
+                    'oc_space_bound': bound_oc_space(model),
+                    'mtest': dtest.metric(model),
+                    'mvalid': dvalid.metric(model),
+                    'mtrain': dtrain.metric(model),
+                    'time_taken_oc': time_taken_oc,
+                    'failed_oc': failed_oc,
+                    'oc_space': int(oc_size), #convert because numpy int cannot be dumped to json
+                    'pct_completed': pct_completed
+                }
+                
+                print(json.dumps(results))
+
+
 @cli.command('verify_pareto_models')
 @click.argument("dname")
 @click.option("--seed", default=util.SEED)
@@ -107,7 +295,6 @@ def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, f
         pareto_fronts = pareto_fronts[dname]
 
     # Now go over all saved xgb models and verify those that are in the pareto front.
-    # If we have verified them but failed, re-verify them and remove their current entry from linear_scan_after_LOP.txt
     file_xgb = f"results/xgb_classification_saved.txt"
     with open(file_xgb, "r") as f:
         for line in f:
@@ -121,9 +308,6 @@ def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, f
                         (pareto_fronts['max_depth'].astype(float) == float(line_dict['params']['max_depth'])) &
                         (pareto_fronts['learning_rate'].astype(float) == float(line_dict['params']['learning_rate']))]['on_front'].values[0] == False:
                 continue # Not on pareto front, skip
-
-            elif os.path.isfile(f'/cw/dtailocal/timo/OCs/OC_boxes_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy'):
-                continue # Already verified and saved
 
             else: 
                 results = {
@@ -145,31 +329,189 @@ def verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, f
                 model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
                 assert line_dict['refinements'][3]['penalty'] == 'ours'
 
-                verification_results, doms, inds, preds = run_verification_tasks(model, dtest.X, dtest.y, timeout=timeout, memory_limit=memory_limit, n=500)
+                oc_file = f'/cw/dtailocal/timo/OCs/OC_enum_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.h5'
+                failed_oc, time_taken_oc, oc_size = enumerate_ocs(model, oc_file, buffer_size=100000, timeout=timeout)
+
+                verification_results = run_verification_tasks(model, dtest.X, dtest.y, oc_file, timeout=timeout, n=500)
+                verification_results['time_taken_oc'] = time_taken_oc
+                verification_results['failed_oc'] = failed_oc
+                verification_results['oc_space'] = int(oc_size) #convert because numpy int cannot be dumped to json
+
+
                 if verbose:
                     print('Model verified')
-                
-                if save:
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_boxes_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', doms)
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_inds_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', inds)
-                    np.save(f'/cw/dtailocal/timo/OCs/OC_preds_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.npy', preds)
                 
                 results['compression'] = {
                     'verification_results': verification_results,
                     'nleafs': model.num_leafs(),
                     'nnodes': model.num_nodes(),
-                    # 'observed_oc_space_training': calculate_observable_oc_space(x=dtrain.X.to_numpy(), at=model),
-                    # 'observed_oc_space_test': calculate_observable_oc_space(x=dtest.X.to_numpy(), at=model),
-                    # 'oc_score_training': calculate_oc_score(x=dtrain.X.to_numpy(), y=dtrain.y.to_numpy(), at=model),
-                    # 'oc_score_test': calculate_oc_score(x=dtest.X.to_numpy(), y=dtest.y.to_numpy(), at=model),
                     'oc_space_bound': bound_oc_space(model),
                     'mtest': dtest.metric(model),
                     'mvalid': dvalid.metric(model),
                     'mtrain': dtrain.metric(model)
                 }
-
+                
                 print(json.dumps(results))
 
+@cli.command('redo_verify_pareto_models')
+@click.argument("dname")
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=86400)
+@click.option("--memory_limit", default=64*1024*1024*1024)
+@click.option("--fold", default=0)
+@click.option("--results_file")
+@click.option("--save", is_flag=True, default=False)
+@click.option("--verbose", is_flag=True, default=False)
+def redo_verify_pareto_models_cmd(dname, seed, silent, timeout, memory_limit, fold, results_file, save, verbose):
+    np.random.seed(seed)
+    random.seed(seed)
+
+    d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
+    
+    lines_to_redo = {}
+    with open(results_file, "r") as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            if line_dict['compression']['verification_results']['failed_oc']:
+                key = f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}"
+                lines_to_redo[key] = line_dict
+            else:
+                print(json.dumps(line_dict))
+
+    file_xgb = f"results/xgb_classification_saved.txt"
+
+    with open(file_xgb, "r") as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            if f"{line_dict['params']['n_estimators']}_{line_dict['params']['max_depth']}_{line_dict['params']['learning_rate']}" not in lines_to_redo:
+                continue # Not on redo list, skip
+            else: 
+                results = {
+                    'date_time': util.nowstr(),
+                    'hostname': os.uname()[1],
+                    'dname': dname,
+                    'fold': fold,
+                    'seed': seed,
+                    'metric_name': line_dict['metric_name'],
+                    'mtrain': line_dict['mtrain'],
+                    'mvalid': line_dict['mvalid'],
+                    'mtest': line_dict['mtest'],
+                    'ntrees': line_dict['ntrees'],
+                    'nnodes': line_dict['nnodes'],
+                    'nleafs': line_dict['nleafs'],
+                    'params': line_dict['params'],
+                }
+
+                model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
+                assert line_dict['refinements'][3]['penalty'] == 'ours'
+
+                oc_file = f'/cw/dtailocal/timo/OCs/OC_enum_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.h5'
+                failed_oc, time_taken_oc, oc_size = enumerate_ocs(model, oc_file, buffer_size=100000, timeout=timeout)
+
+                verification_results = run_verification_tasks(model, dtest.X, dtest.y, oc_file, timeout=timeout, memory_limit=memory_limit, n=500)
+                verification_results['time_taken_oc'] = time_taken_oc
+                verification_results['failed_oc'] = failed_oc
+                verification_results['oc_space'] = int(oc_size) #convert because numpy int cannot be dumped to json
+
+
+                if verbose:
+                    print('Model verified')
+                
+                results['compression'] = {
+                    'verification_results': verification_results,
+                    'nleafs': model.num_leafs(),
+                    'nnodes': model.num_nodes(),
+                    'oc_space_bound': bound_oc_space(model),
+                    'mtest': dtest.metric(model),
+                    'mvalid': dvalid.metric(model),
+                    'mtrain': dtrain.metric(model)
+                }
+                
+                print(json.dumps(results))
+
+
+@cli.command('funky_norm')
+@click.argument("dname")
+@click.option("--seed", default=util.SEED)
+@click.option("--silent", is_flag=True, default=True)
+@click.option("--timeout", default=86400)
+@click.option("--fold", default=0)
+def funky_norm_cmd(dname, seed, silent, timeout, fold):
+    np.random.seed(seed)
+    random.seed(seed)
+
+    d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
+
+     # Load in the pareto fronts
+    with open('pareto_fronts_LOP.pkl', 'rb') as f:
+        pareto_fronts = pickle.load(f)
+        pareto_fronts = pareto_fronts[dname]
+
+    file = f"results/xgb_classification_saved.txt"
+    with open(file, "r") as f:
+        for line in f:
+            if not line.startswith('{'):
+                continue
+            line_dict = json.loads(line.strip())
+            if line_dict['dname'] != dname or line_dict['fold'] != fold:
+                continue
+            # Check if this model is in the pareto front, if not we don't bother verifying it.
+            if pareto_fronts[(pareto_fronts['n_estimators'].astype(float) == float(line_dict['params']['n_estimators'])) &
+                        (pareto_fronts['max_depth'].astype(float) == float(line_dict['params']['max_depth'])) &
+                        (pareto_fronts['learning_rate'].astype(float) == float(line_dict['params']['learning_rate']))]['on_front'].values[0] == False:
+                continue # Not on pareto front, skip
+
+            
+            model = veritas.AddTree.from_json(line_dict['refinements'][3]['model_json'])
+            assert line_dict['refinements'][3]['penalty'] == 'ours'
+
+
+            results = {
+                'date_time': util.nowstr(),
+                'hostname': os.uname()[1],
+                'dname': dname,
+                'fold': fold,
+                'seed': seed,
+                'metric_name': line_dict['metric_name'],
+                'mtrain': line_dict['mtrain'],
+                'mvalid': line_dict['mvalid'],
+                'mtest': line_dict['mtest'],
+                'ntrees': line_dict['ntrees'],
+                'nnodes': line_dict['nnodes'],
+                'nleafs': line_dict['nleafs'],
+                'params': line_dict['params'],
+            }
+
+            oc_file = f'/cw/dtaiproj/ml/2026-OCspace/OC_enum_{dname}_{line_dict["params"]["n_estimators"]}_{line_dict["params"]["max_depth"]}_{line_dict["params"]["learning_rate"]}_fold{fold}.h5'
+
+            try:
+                verification_results = run_robustness_task(model, oc_file, dtest.X, dtest.y, l_inf=0.1, l_1=0.15, time_limit=timeout, n=500)
+            except (MemoryError, OSError):
+                verification_results = {'failed_oc': True}
+                gc.collect()
+
+            results['funky_norm'] = {
+                'verification_results': verification_results,
+                'nleafs': model.num_leafs(),
+                'nnodes': model.num_nodes(),
+                'mtest': dtest.metric(model),
+                'mvalid': dvalid.metric(model),
+                'mtrain': dtrain.metric(model)
+            }
+
+            print(json.dumps(results))
+
+        
+            
 
 
 def calculate_oc_score(x, y, at):

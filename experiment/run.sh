@@ -31,15 +31,21 @@ elif [ "${HOSTNAME}" = "himec05" ]; then
 elif [ "${HOSTNAME}" = "himec01" ]; then
     NTHREADS=20
 elif [ "${HOSTNAME}" = "himec03" ]; then
-    NTHREADS=1
+    NTHREADS=6
 elif [ "${HOSTNAME}" = "himec04" ]; then
-    NTHREADS=1
+    NTHREADS=6
 elif [ "${HOSTNAME}" = "himec08" ]; then
-    NTHREADS=30
+    NTHREADS=1
+elif [ "${HOSTNAME}" = "himec07" ]; then
+    NTHREADS=1
 elif [ "${HOSTNAME}" = "pinac44" ]; then
     NTHREADS=20
+elif [ "${HOSTNAME}" = "himec10" ]; then
+    NTHREADS=2
+elif [ "${HOSTNAME}" = "himec09" ]; then
+    NTHREADS=2
 else
-    NTHREADS=10  # assuming new
+    NTHREADS=2  # assuming new
 fi
 
 echo "###################################################"  | tee --append $OUTNAME
