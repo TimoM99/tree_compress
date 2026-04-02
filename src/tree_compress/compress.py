@@ -534,22 +534,23 @@ class Compress:
                 coefs = best.coefs
                 atp = self.prune_trees(at, intercept, coefs, index)
 
-                print(f"mtrain {best.clf_mtrain:.4f}")
-                print(
-                    f"  atp  {self.score(self._transformy(target, self.d.ytrain), at_predlab(atp, self.d.xtrain)):.4f}",
-                    atp,
-                )
-                print(
-                    f"  at   {self.score(self._transformy(target, self.d.ytrain), at_predlab(at, self.d.xtrain)):.4f}",
-                    at,
-                )
-                print(f"mvalid {best.clf_mvalid:.4f}")
-                print(
-                    f"  atp  {self.score(self._transformy(target, self.d.yvalid), at_predlab(atp, self.d.xvalid)):.4f}"
-                )
-                print(
-                    f"  at   {self.score(self._transformy(target, self.d.yvalid), at_predlab(at, self.d.xvalid)):.4f}"
-                )
+                if not self.silent:
+                    print(f"mtrain {best.clf_mtrain:.4f}")
+                    print(
+                        f"  atp  {self.score(self._transformy(target, self.d.ytrain), at_predlab(atp, self.d.xtrain)):.4f}",
+                        atp,
+                    )
+                    print(
+                        f"  at   {self.score(self._transformy(target, self.d.ytrain), at_predlab(at, self.d.xtrain)):.4f}",
+                        at,
+                    )
+                    print(f"mvalid {best.clf_mvalid:.4f}")
+                    print(
+                        f"  atp  {self.score(self._transformy(target, self.d.yvalid), at_predlab(atp, self.d.xvalid)):.4f}"
+                    )
+                    print(
+                        f"  at   {self.score(self._transformy(target, self.d.yvalid), at_predlab(at, self.d.xvalid)):.4f}"
+                    )
 
                 self.at_singletarget[target] = atp
                 bests.append(best)
@@ -643,11 +644,16 @@ class Compress:
         import warnings
 
         from sklearn.exceptions import ConvergenceWarning
-
+        
+        idx = np.random.choice(len(xxtrain), size=100000, replace=False)
+        xxtrain = xxtrain[idx]
+        yytrain = yytrain[idx]
+        
         fit_time = time.time()
         if self.no_convergence_warning:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                
                 clf.fit(xxtrain, yytrain)
         else:
             clf.fit(xxtrain, yytrain)
