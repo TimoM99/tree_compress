@@ -564,10 +564,12 @@ class Compress:
                         for leaf in t.get_leaf_ids():
                             t.set_leaf_value(leaf, t.get_leaf_value(leaf, 0)/nb_trees)
                 atp = new_at
-                print(
-                    f"WARNING: weights of target {target} not updated,",
-                    "combined model might fail",
-                )
+                
+                if not self.silent:
+                    print(
+                        f"WARNING: weights of target {target} not updated,",
+                        "combined model might fail",
+                    )
 
             new_full_at.add_trees(atp, target)
             

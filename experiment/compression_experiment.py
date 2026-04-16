@@ -213,7 +213,7 @@ def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout
 
                 compr.no_convergence_warning = True
                 at_refined = compr.compress(max_rounds=2, timeout=timeout)
-                best_alpha = compr.records[-1].alpha
+                best_alpha = compr.records[-1].alphas[0]
             
             elif penalty == 'gr':
                 
