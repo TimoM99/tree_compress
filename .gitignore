@@ -10,6 +10,7 @@ experiment/figures
 experiment/__pycache__
 experiment/results
 experiment/results.zip
+experiment/settings/
 examples/tex
 *.png
 archive/
@@ -17,3 +18,5 @@ build/
 *.pdf
 .flake8
 ruff.toml
+
+gurobi.log
