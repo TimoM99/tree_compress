@@ -645,9 +645,10 @@ class Compress:
 
         from sklearn.exceptions import ConvergenceWarning
         
-        idx = np.random.choice(len(xxtrain), size=100000, replace=False)
-        xxtrain = xxtrain[idx]
-        yytrain = yytrain[idx]
+        if len(xxtrain) > 100000:
+            idx = np.random.choice(len(xxtrain), size=100000, replace=False)
+            xxtrain = xxtrain[idx]
+            yytrain = yytrain[idx]
         
         fit_time = time.time()
         if self.no_convergence_warning:
