@@ -32,34 +32,44 @@ def cli():
     pass
 
 @cli.command("list_compression_classification")
+@click.argument('penalties', nargs=-1, type=click.Choice(['gr', 'lrl1', 'lop', 'ic', 'forestprune']))
 @click.option("--save", is_flag=True, default=False)
 @click.option("-m", "--model_type", type=click.Choice(["xgb", "rf", "lgb", "dt"]),
               default="xgb")
 @click.option("--abserr", default=0.005)
 @click.option("--seed", default=util.SEED)
 @click.option("--silent", is_flag=True, default=False)
-def print_configs(save, model_type, abserr, seed, silent):
-    for dname in util.DNAMES_SUBSUB:
+@click.option("--lop_rounds", default=2)
+def print_configs(penalties, save, model_type, abserr, seed, silent, lop_rounds):
+    for dname in util.DNAMES_SUBSUB + ['HiggsBig', 'FashionMnist[1vRest]']:
         d = prada.get_dataset(dname, seed=seed, silent=True)
 
         folds = [i for i in range(util.NFOLDS)]
 
-        grid = d.paramgrid(fold=folds)
+        params_dict = model_params.get_params(d, model_type)
+        grid = d.paramgrid(fold=folds, **params_dict)
 
         for cli_param in grid:
             print("python3 compression_experiment.py compression_classification",
                   dname,
+                  " ".join(f"{p}" for p in penalties),
                   "--save" if save else "",
                   "--model_type", model_type,
                   "--fold", cli_param["fold"],
                   "--abserr", abserr,
                   "--seed", seed,
-                  "--silent" if silent else "")
+                  "--silent" if silent else ""
+                  "--n_estimators", cli_param["n_estimators"],
+                  "--max_depth", cli_param["max_depth"],
+                  "--lr", cli_param["learning_rate"],
+                  "--lop_rounds", lop_rounds if 'lop' in penalties else "")
+                
 
 
 
 @cli.command("compression_classification")
 @click.argument("dname")
+@click.argument('penalties', nargs=-1, type=click.Choice(['gr', 'lrl1', 'lop', 'ic', 'forestprune']))
 @click.option("--save", is_flag=True, default=False)
 @click.option("-m", "--model_type", type=click.Choice(["xgb", "rf", "lgb", "dt"]),
               default="xgb")
@@ -67,245 +77,251 @@ def print_configs(save, model_type, abserr, seed, silent):
 @click.option("--abserr", default=0.005)
 @click.option("--seed", default=util.SEED)
 @click.option("--silent", is_flag=True, default=True)
-@click.option("--timeout", default=21600)
-def compression_cmd(dname, save, model_type, fold, abserr, seed, silent, timeout):
+@click.option("--timeout", default=43200)
+@click.option("--lop_rounds", default=2)
+@click.option("--lr", default=0.1)
+@click.option("--n_estimators", default=10)
+@click.option("--max_depth", default=4)
+def compression_cmd(dname, penalties, save, model_type, fold, abserr, seed, silent, timeout, lop_rounds, lr, n_estimators, max_depth):
     np.random.seed(seed)
     torch.manual_seed(seed)
     random.seed(seed)
-
-    penalties = ['gr', 'ic', 'lrl1', 'ours', 'forestprune']
     
     d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
     model_class = d.get_model_class(model_type)
 
     param_dict = model_params.get_params(d, model_type)
-    for param in d.paramgrid(**param_dict):
-        # Fit xgb model
-        clf, train_time = dtrain.train(model_class, param)
-        
-        mtrain = dtrain.metric(clf)
-        mvalid = dvalid.metric(clf)
-        mtest =  dtest.metric(clf)
-        at_orig = veritas.get_addtree(clf, silent=silent)
-        n_leafs_before = at_orig.num_leafs()
-
-        results = {
-            'date_time': util.nowstr(),
-            'hostname': os.uname()[1],
-            'dname': dname,
-            'model_type': model_type,
-            'fold': fold,
-            'seed': seed,
-            'metric_name': d.metric_name,
-            'train_time': train_time,
-            'mtrain': mtrain,
-            'mvalid': mvalid,
-            'mtest': mtest,
-            'ntrees': len(at_orig),
-            'nnodes': int(at_orig.num_nodes()),
-            'nleafs': n_leafs_before,
-            'max_depth': int(at_orig.max_depth()),
-            'params': param,
-            'refinements': []
-        }
-        if save:
-            results['model_json'] = at_orig.to_json()
-
-        # Apply the different compression methods
-        for penalty in penalties:
-            refine_time = time.time()
-
-            sparse_train_x = transform_data_sparse(at_orig, dtrain.X)
-            sparse_valid_x = transform_data_sparse(at_orig, dvalid.X)
-
-            if penalty == "lrl1":
-                timer = time.time()
-                accuratest = mvalid
-                best_alpha = 0.0
-                smallest = n_leafs_before
-                alpha_list = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.925,0.955,0.975,1]
-                for alpha in alpha_list:
-                    if time.time() - timer > timeout:
-                        break
-                    refiner = LRPlusL1Refiner()
-                    refiner.set_params(at_orig, alpha)
-                    np.random.seed(seed)
-                    refiner.refine(50, sparse_train_x, dtrain.y)
-
-                    preds = refiner.forward_sparse(sparse_valid_x)
-                    score = dvalid.metric(preds > 0.5)
-
-                    # Note: In case of random forests, predictions are calculated by taking the 
-                    # average prediction of all trees. However, if we change the leaf values using 
-                    # this refiner, the predictions of a tree no longer represent a probability, but 
-                    # a logit. Positive logits -> positive prediction, negative logits -> negative prediction.
-                    # The RF AddTree will thus calculate the average logit instead of adding them. This makes
-                    # that the probabilities are not correct! But, since we only care about balanced accuracy,
-                    # it's the target prediction that matters and this remains the same.
-                    at_compr = at_orig.copy()
-                    at_compr = set_new_addtree(
-                        refiner.tree_weights.detach().numpy(),
-                        [w.detach().numpy() for w in refiner.leaf_weights],
-                        refiner.base_score.detach().numpy(),
-                        at_compr)
-                    
-                    num_leafs_after = at_compr.num_leafs()
-                    
-                    if score > mvalid - abserr:
-                        if (num_leafs_after < smallest):
-                            smallest = num_leafs_after
-                            best_alpha = alpha
-                            accuratest = score
-                        elif (smallest == num_leafs_after) and (accuratest < score):
-                            best_alpha = alpha
-                            accuratest = score
-
-                at_refined = at_orig.copy()
-                # If the best alpha is 0.0, then we don't need to refine the tree.
-                # because we couldn't find a better tree or a timeout was reached.
-                if best_alpha != 0.0:
+    param_dict.update({
+        'learning_rate': lr,
+        'n_estimators': n_estimators,
+        'max_depth': max_depth
+    })
     
-                    refiner.set_params(at_orig, best_alpha)
-                    np.random.seed(seed)
-                    refiner.refine(50, sparse_train_x, dtrain.y)
-                    
-                    at_refined = set_new_addtree(
-                        refiner.tree_weights.detach().numpy(),
-                        [w.detach().numpy() for w in refiner.leaf_weights],
-                        refiner.base_score.detach().numpy(),
-                        at_refined)
+    # Fit xgb model
+    clf, train_time = dtrain.train(model_class, param_dict)
+    
+    mtrain = dtrain.metric(clf)
+    mvalid = dvalid.metric(clf)
+    mtest =  dtest.metric(clf)
+    at_orig = veritas.get_addtree(clf, silent=silent)
+    n_leafs_before = at_orig.num_leafs()
 
-            elif penalty == "ic":
-                # Calculate the prediction probability for each tree in the ensemble.
-                ensemble_proba = np.asarray([sigmoid(t.eval(dtrain.X)) if at_orig.get_type() == veritas.AddTreeType.CLF_SOFTMAX else t.eval(dtrain.X) for t in at_orig])
-                ensemble_proba = np.concatenate((1 - ensemble_proba, ensemble_proba), axis=2)
-                ic_list = individual_contribution(ensemble_proba, dtrain.y.to_numpy())
-                # Individual contribution is negative, so we sort in ascending order.
-                sorted_trees = [at_orig[i] for i in np.argsort(ic_list)]
-                at_refined = veritas.AddTree(at_orig.num_leaf_values(), at_orig.get_type())
-                at_refined.set_base_score(0, at_orig.get_base_score(0) if at_orig.get_type() == veritas.AddTreeType.CLF_SOFTMAX else 0)
+    results = {
+        'date_time': util.nowstr(),
+        'hostname': os.uname()[1],
+        'dname': dname,
+        'model_type': model_type,
+        'fold': fold,
+        'seed': seed,
+        'metric_name': d.metric_name,
+        'train_time': train_time,
+        'mtrain': mtrain,
+        'mvalid': mvalid,
+        'mtest': mtest,
+        'ntrees': len(at_orig),
+        'nnodes': int(at_orig.num_nodes()),
+        'nleafs': n_leafs_before,
+        'max_depth': int(at_orig.max_depth()),
+        'params': param_dict,
+        'refinements': []
+    }
+    if save:
+        results['model_json'] = at_orig.to_json()
 
-                # Keep adding trees until the validation score is within the error margin.
-                score = -np.inf
-                nb_trees = 0
-                while (score < mvalid - abserr) and (nb_trees < len(sorted_trees)):
-                    at_refined.add_tree(sorted_trees[nb_trees])
-                    if at_refined.get_type() == veritas.AddTreeType.CLF_MEAN:
-                        at_refined.set_base_score(0, -len(at_refined)/2)
-                    score = dvalid.metric(at_refined)
-                    nb_trees += 1
+    # Apply the different compression methods
+    for penalty in penalties:
+        refine_time = time.time()
 
+        sparse_train_x = transform_data_sparse(at_orig, dtrain.X)
+        sparse_valid_x = transform_data_sparse(at_orig, dvalid.X)
 
-            elif penalty == "ours":
-                data = tree_compress.Data(
-                    dtrain.X.to_numpy(), dtrain.y.to_numpy(),
-                    dtest.X.to_numpy(), dtest.y.to_numpy(),
-                    dvalid.X.to_numpy(), dvalid.y.to_numpy())
+        if penalty == "lrl1":
+            timer = time.time()
+            accuratest = mvalid
+            best_alpha = 0.0
+            smallest = n_leafs_before
+            alpha_list = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.925,0.955,0.975,1]
+            for alpha in alpha_list:
+                if time.time() - timer > timeout:
+                    break
+                refiner = LRPlusL1Refiner()
+                refiner.set_params(at_orig, alpha)
+                np.random.seed(seed)
+                refiner.refine(50, sparse_train_x, dtrain.y)
+
+                preds = refiner.forward_sparse(sparse_valid_x)
+                score = dvalid.metric(preds > 0.5)
+
+                # Note: In case of random forests, predictions are calculated by taking the 
+                # average prediction of all trees. However, if we change the leaf values using 
+                # this refiner, the predictions of a tree no longer represent a probability, but 
+                # a logit. Positive logits -> positive prediction, negative logits -> negative prediction.
+                # The RF AddTree will thus calculate the average logit instead of adding them. This makes
+                # that the probabilities are not correct! But, since we only care about balanced accuracy,
+                # it's the target prediction that matters and this remains the same.
+                at_compr = at_orig.copy()
+                at_compr = set_new_addtree(
+                    refiner.tree_weights.detach().numpy(),
+                    [w.detach().numpy() for w in refiner.leaf_weights],
+                    refiner.base_score.detach().numpy(),
+                    at_compr)
                 
-                compr = tree_compress.Compress(
-                            data,
-                            at_orig,
-                            score=balanced_accuracy_score,
-                            isworse=lambda v, ref: ref-v > abserr,
-                            seed=5823,
-                            silent=silent
-                        )
+                num_leafs_after = at_compr.num_leafs()
+                
+                if score > mvalid - abserr:
+                    if (num_leafs_after < smallest):
+                        smallest = num_leafs_after
+                        best_alpha = alpha
+                        accuratest = score
+                    elif (smallest == num_leafs_after) and (accuratest < score):
+                        best_alpha = alpha
+                        accuratest = score
 
-                compr.no_convergence_warning = True
-                at_refined = compr.compress(max_rounds=2, timeout=timeout)
-                best_alpha = compr.records[-1].alpha
+            at_refined = at_orig.copy()
+            # If the best alpha is 0.0, then we don't need to refine the tree.
+            # because we couldn't find a better tree or a timeout was reached.
+            if best_alpha != 0.0:
+
+                refiner.set_params(at_orig, best_alpha)
+                np.random.seed(seed)
+                refiner.refine(50, sparse_train_x, dtrain.y)
+                
+                at_refined = set_new_addtree(
+                    refiner.tree_weights.detach().numpy(),
+                    [w.detach().numpy() for w in refiner.leaf_weights],
+                    refiner.base_score.detach().numpy(),
+                    at_refined)
+
+        elif penalty == "ic":
+            # Calculate the prediction probability for each tree in the ensemble.
+            ensemble_proba = np.asarray([sigmoid(t.eval(dtrain.X)) if at_orig.get_type() == veritas.AddTreeType.CLF_SOFTMAX else t.eval(dtrain.X) for t in at_orig])
+            ensemble_proba = np.concatenate((1 - ensemble_proba, ensemble_proba), axis=2)
+            ic_list = individual_contribution(ensemble_proba, dtrain.y.to_numpy())
+            # Individual contribution is negative, so we sort in ascending order.
+            sorted_trees = [at_orig[i] for i in np.argsort(ic_list)]
+            at_refined = veritas.AddTree(at_orig.num_leaf_values(), at_orig.get_type())
+            at_refined.set_base_score(0, at_orig.get_base_score(0) if at_orig.get_type() == veritas.AddTreeType.CLF_SOFTMAX else 0)
+
+            # Keep adding trees until the validation score is within the error margin.
+            score = -np.inf
+            nb_trees = 0
+            while (score < mvalid - abserr) and (nb_trees < len(sorted_trees)):
+                at_refined.add_tree(sorted_trees[nb_trees])
+                if at_refined.get_type() == veritas.AddTreeType.CLF_MEAN:
+                    at_refined.set_base_score(0, -len(at_refined)/2)
+                score = dvalid.metric(at_refined)
+                nb_trees += 1
+
+
+        elif penalty == "lop":
+            data = tree_compress.Data(
+                dtrain.X.to_numpy(), dtrain.y.to_numpy(),
+                dtest.X.to_numpy(), dtest.y.to_numpy(),
+                dvalid.X.to_numpy(), dvalid.y.to_numpy())
             
-            elif penalty == 'gr':
-                
-                timer = time.time()
-                C = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1] # Values as suggested by paper.
-                improvement = True
-                refiner = LinearSVC( #The paper optimizes a linear SVM with hinge loss and L2 regularisation to optimize leaf values.
-                    penalty='l2',
-                    loss='hinge',
-                    dual=True,
-                    max_iter=1000,
-                    fit_intercept=True,
-                    random_state=3582134
-                )
-                # Initially, the refined at is the same as the original at.
-                at_refined = at_orig.copy()
-                while improvement:
-                    if time.time() - timer > timeout:
-                        break
-                    best_c = None
-                    best_score = -np.inf
-                    for c in C:
-                        refiner.set_params(C=c)
-                        # Optimize W
-                        sparse_train_x = transform_data_sparse(at_refined, dtrain.X)
-                        refiner.fit(sparse_train_x, dtrain.y)
-                        at_optimized = at_refined.copy()
-                        at_optimized = set_new_leaf_vals(at_optimized, refiner.intercept_[0], refiner.coef_[0])
-                        # Check if optimized tree score (with the current regularization strength) is better than best_score.
-                        score_temp = dvalid.metric(at_optimized)
-                        if score_temp > best_score:
-                            best_score = score_temp
-                            best_c = c
+            compr = tree_compress.Compress(
+                        data,
+                        at_orig,
+                        score=balanced_accuracy_score,
+                        isworse=lambda v, ref: ref-v > abserr,
+                        seed=5823,
+                        silent=silent
+                    )
 
-                    # Using best C value to optimize W
-                    refiner.set_params(C=best_c)
+            compr.no_convergence_warning = True
+            at_refined = compr.compress(max_rounds=lop_rounds, timeout=timeout)
+            best_alpha = compr.records[-1].alphas[0] # Get alpha value of first target class.
+        
+        elif penalty == 'gr':
+            
+            timer = time.time()
+            C = [0.00001, 0.0001, 0.001, 0.01, 0.1, 1] # Values as suggested by paper.
+            improvement = True
+            refiner = LinearSVC( #The paper optimizes a linear SVM with hinge loss and L2 regularisation to optimize leaf values.
+                penalty='l2',
+                loss='hinge',
+                dual=True,
+                max_iter=1000,
+                fit_intercept=True,
+                random_state=3582134
+            )
+            # Initially, the refined at is the same as the original at.
+            at_refined = at_orig.copy()
+            while improvement:
+                if time.time() - timer > timeout:
+                    break
+                best_c = None
+                best_score = -np.inf
+                for c in C:
+                    refiner.set_params(C=c)
+                    # Optimize W
+                    sparse_train_x = transform_data_sparse(at_refined, dtrain.X)
                     refiner.fit(sparse_train_x, dtrain.y)
                     at_optimized = at_refined.copy()
                     at_optimized = set_new_leaf_vals(at_optimized, refiner.intercept_[0], refiner.coef_[0])
-                    # Find difference threshold for merging neighbouring leaves
-                    threshold = find_pruning_threshold(at_optimized, 10) # The paper suggests to prune 10% per iteration
-                    # Merge neighbouring leaves
-                    at_pruned = gr_prune(at_optimized, threshold)
-                    # Check if after pruning we don't exceed max abserr
-                    if (dvalid.metric(at_orig) - dvalid.metric(at_pruned) > abserr) \
-                        or (at_pruned.num_leafs() == at_optimized.num_leafs()) \
-                        or (at_pruned.num_leafs() == len(at_pruned)): # In the extreme case that all leaves are pruned, stop the algorithm -> example bacc(at_orig) < 0.500 + abs_err, then the pruned tree will be 0.5.
-                        improvement = False
-                    else:
-                        at_refined = at_pruned
-                
-            elif penalty == "forestprune":
-                timer = time.time()
-                data = tree_compress.Data(
-                    dtrain.X.to_numpy(), dtrain.y.to_numpy(),
-                    dtest.X.to_numpy(), dtest.y.to_numpy(),
-                    dvalid.X.to_numpy(), dvalid.y.to_numpy())
-                
-                fprune = tree_compress.ForestPrune(data, clf, seed=util.SEED)
-                time_spent = time.time() - timer
-                at_refined = fprune.prune(timeout - time_spent)
+                    # Check if optimized tree score (with the current regularization strength) is better than best_score.
+                    score_temp = dvalid.metric(at_optimized)
+                    if score_temp > best_score:
+                        best_score = score_temp
+                        best_c = c
 
-            else:
-                raise RuntimeError(f"{penalty} refiner has not been implemented yet.")
+                # Using best C value to optimize W
+                refiner.set_params(C=best_c)
+                refiner.fit(sparse_train_x, dtrain.y)
+                at_optimized = at_refined.copy()
+                at_optimized = set_new_leaf_vals(at_optimized, refiner.intercept_[0], refiner.coef_[0])
+                # Find difference threshold for merging neighbouring leaves
+                threshold = find_pruning_threshold(at_optimized, 10) # The paper suggests to prune 10% per iteration
+                # Merge neighbouring leaves
+                at_pruned = gr_prune(at_optimized, threshold)
+                # Check if after pruning we don't exceed max abserr
+                if (dvalid.metric(at_orig) - dvalid.metric(at_pruned) > abserr) \
+                    or (at_pruned.num_leafs() == at_optimized.num_leafs()) \
+                    or (at_pruned.num_leafs() == len(at_pruned)): # In the extreme case that all leaves are pruned, stop the algorithm -> example bacc(at_orig) < 0.500 + abs_err, then the pruned tree will be 0.5.
+                    improvement = False
+                else:
+                    at_refined = at_pruned
+            
+        elif penalty == "forestprune":
+            timer = time.time()
+            data = tree_compress.Data(
+                dtrain.X.to_numpy(), dtrain.y.to_numpy(),
+                dtest.X.to_numpy(), dtest.y.to_numpy(),
+                dvalid.X.to_numpy(), dvalid.y.to_numpy())
+            
+            fprune = tree_compress.ForestPrune(data, clf, seed=util.SEED)
+            time_spent = time.time() - timer
+            at_refined = fprune.prune(timeout - time_spent)
 
-            refine_time = time.time() - refine_time
-            mtrain_refined = dtrain.metric(at_refined)
-            mvalid_refined = dvalid.metric(at_refined)
-            mtest_refined = dtest.metric(at_refined)
-            
-            
-            results['refinements'].append({
-                'penalty': penalty,
-                'compr_time': refine_time,
-                'mtrain': mtrain_refined,
-                'mvalid': mvalid_refined,
-                'mtest': mtest_refined,
-                'ntrees': len(at_refined),
-                'nnodes': int(at_refined.num_nodes()),
-                'nleafs': at_refined.num_leafs(),
-                'max_depth': int(at_refined.max_depth()),
-            })
-            
-            if penalty == 'ours':
-                results['refinements'][-1]['best_alpha'] = best_alpha
-            if save:
-                results['refinements'][-1]['model_json'] = at_refined.to_json()
-            
-        if not silent:
-            __import__('pprint').pprint(results)
-        print(json.dumps(results))
+        else:
+            raise RuntimeError(f"{penalty} refiner has not been implemented yet.")
 
+        refine_time = time.time() - refine_time
+        mtrain_refined = dtrain.metric(at_refined)
+        mvalid_refined = dvalid.metric(at_refined)
+        mtest_refined = dtest.metric(at_refined)
+        
+        
+        results['refinements'].append({
+            'penalty': penalty,
+            'compr_time': refine_time,
+            'mtrain': mtrain_refined,
+            'mvalid': mvalid_refined,
+            'mtest': mtest_refined,
+            'ntrees': len(at_refined),
+            'nnodes': int(at_refined.num_nodes()),
+            'nleafs': at_refined.num_leafs(),
+            'max_depth': int(at_refined.max_depth()),
+        })
+        
+        if penalty == 'lop':
+            results['refinements'][-1]['best_alpha'] = best_alpha
+        if save:
+            results['refinements'][-1]['model_json'] = at_refined.to_json()
+        
+    if not silent:
+        __import__('pprint').pprint(results)
+    print(json.dumps(results))
 
 
 @cli.command("list_compression_regression")
@@ -349,7 +365,7 @@ def compression_regression_cmd(dname, save, model_type, fold, abserr, seed, sile
     torch.manual_seed(seed)
     random.seed(seed)
 
-    penalties = ['gr', 'lrl1', 'ours', 'forestprune']
+    penalties = ['gr', 'lrl1', 'lop', 'forestprune']
     d, dtrain, dvalid, dtest = util.get_dataset(dname, seed, fold, silent)
     model_class = d.get_model_class(model_type)
 
@@ -450,7 +466,7 @@ def compression_regression_cmd(dname, save, model_type, fold, abserr, seed, sile
                         refiner.base_score.detach().numpy(),
                         at_refined)
 
-            elif penalty == "ours":
+            elif penalty == "lop":
                 data = tree_compress.Data(
                     dtrain.X.to_numpy(), dtrain.y.to_numpy(),
                     dtest.X.to_numpy(), dtest.y.to_numpy(),
@@ -609,7 +625,7 @@ def compression_regression_cmd(dname, save, model_type, fold, abserr, seed, sile
                 'nleafs': at_refined.num_leafs(),
                 'max_depth': int(at_refined.max_depth()),
             })
-            if penalty == 'ours':
+            if penalty == 'lop':
                 results['refinements'][-1]['best_alpha'] = best_alpha
             if save:
                 results['refinements'][-1]['model_json'] = at_refined.to_json()
